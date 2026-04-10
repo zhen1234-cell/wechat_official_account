@@ -1,0 +1,49 @@
+# ChatWiki Open Source License
+
+ChatWiki is licensed under the Apache License 2.0, with the following additional conditions:
+
+1. Usage Terms:
+
+a. Personal Use: ChatWiki is free for use by individuals, including both non-commercial and commercial activities conducted by individuals.
+
+b. Corporate/Organizational Commercial Use: Any company, organization, institution, or team (hereinafter referred to as an "Organization") that uses ChatWiki for commercial purposes must obtain a commercial license from the Producer. This requirement includes, but is not limited to, the following scenarios:
+  - Deploying, operating, or using ChatWiki within an Organization's internal environment.
+  - Using ChatWiki to generate content, provide services, or develop applications for the Organization itself or for external clients, generating revenue directly or indirectly.
+  - Integrating ChatWiki into commercial products or services offered by the Organization to others.
+  - Multi-tenant SaaS Service: You are prohibited from using the ChatWiki source code to operate a multi-tenant Software-as-a-Service (SaaS) platform without explicit written authorization from the Producer.
+
+2. Additional Requirements
+
+a. Logo and Copyright Information: When using the frontend components of ChatWiki (as defined below), you may not remove or modify the "ChatWiki" logo, trademark, or copyright notices contained therein. This requirement does not apply to integrations that only utilize ChatWiki's backend services or APIs.
+- Definition of Frontend Components: For the purposes of this agreement, "frontend components" specifically refer to the code and assets located in the ./front-end, ./html-template, and ./static directories of the project source code, or their equivalents in packaged/distributed forms (e.g., within a Docker image). This includes all user-facing interfaces, templates, and static resources.
+
+b. Third-Party Services: ChatWiki may integrate with or support third-party services (such as LLM APIs). Users are responsible for obtaining the necessary usage rights, API keys, and complying with the respective terms of service for such third-party services. The Producer assumes no liability for these third-party services.
+
+3. Contributor Agreement
+
+As a contributor, you agree that:
+a. The Producer reserves the right to adjust the strictness or leniency of this Open Source Agreement as deemed necessary within reasonable bounds.
+b. The code you contribute may be used by the Producer for any commercial purpose, including but not limited to its cloud service business (e.g., ChatWiki Cloud Services).
+
+4. Intellectual Property Statement
+
+The specific interactive design and user interface of this product are protected by design patents or related intellectual property rights.
+
+Apart from the specific conditions mentioned above, all other rights and restrictions follow the Apache License 2.0. Detailed information about the Apache License 2.0 can be found at http://www.apache.org/licenses/LICENSE-2.0.
+
+For commercial licensing matters, please contact us via email at: fox@2bai.com.cn
+
+© 2025 Wuhan Sesame Small Customer Service Network Technology Co., Ltd. 
+----------
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
