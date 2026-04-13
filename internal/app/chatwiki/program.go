@@ -1,0 +1,293 @@
+// Copyright © 2016- 2025 Wuhan Sesame Small Customer Service Network Technology Co., Ltd.
+
+package chatwiki
+
+import (
+	"chatwiki/internal/app/chatwiki/business"
+	"chatwiki/internal/app/chatwiki/business/manage"
+	"chatwiki/internal/app/chatwiki/common"
+	"chatwiki/internal/app/chatwiki/data/migrations"
+	"chatwiki/internal/app/chatwiki/define"
+	"chatwiki/internal/app/chatwiki/initialize"
+	"chatwiki/internal/app/chatwiki/work_flow"
+	"chatwiki/internal/pkg/casbin"
+	"chatwiki/internal/pkg/lib_define"
+	"chatwiki/internal/pkg/lib_web"
+	"embed"
+	"fmt"
+	"net/http"
+	_ "net/http/pprof"
+	"strings"
+
+	"github.com/pressly/goose/v3"
+	"github.com/robfig/cron/v3"
+	"github.com/spf13/cast"
+	"github.com/zhimaAi/go_tools/logs"
+	"github.com/zhimaAi/go_tools/mq"
+	"github.com/zhimaAi/go_tools/msql"
+	"github.com/zhimaAi/go_tools/tool"
+)
+
+func Run() {
+	//initialize
+	initialize.Initialize()
+	//postgres table
+	PostgresTable()
+	//producer handle
+	define.ProducerHandle = mq.NewProducerHandle().SetWorkNum(3).SetHostAndPort(define.Config.Nsqd[`host`], cast.ToUint(define.Config.Nsqd[`port`]))
+	//consumer handle
+	define.ConsumerHandle = mq.NewConsumerHandle().SetHostAndPort(define.Config.NsqLookup[`host`], cast.ToUint(define.Config.NsqLookup[`port`]))
+	//web start
+	go lib_web.WebRun(define.WebService)
+	//pprof api
+	go func() {
+		err := http.ListenAndServe(":55557", nil)
+		if err != nil {
+			logs.Error(err.Error())
+		}
+	}()
+
+	//consumer start
+	StartConsumer()
+
+	//cron tasks
+	StartCronTasks()
+	//start delay
+	go business.StartDelayService()
+}
+
+func Stop() {
+	define.ConsumerHandle.Stop()
+	lib_web.Shutdown(define.WebService)
+	define.ProducerHandle.Stop()
+	//stop delay
+	common.StopDelayService()
+}
+
+func StartConsumer() {
+	common.RunTask(define.ConvertHtmlTopic, define.ConvertHtmlChannel, cast.ToUint(define.Config.ConsumerNum[`ConvertHtml`]), business.ConvertHtml)
+	common.RunTask(define.ConvertVectorTopic, define.ConvertVectorChannel, cast.ToUint(define.Config.ConsumerNum[`ConvertVector`]), business.ConvertVector)
+	common.RunTask(define.ConvertGraphTopic, define.ConvertGraphChannel, cast.ToUint(define.Config.ConsumerNum[`ConvertGraph`]), business.ConvertGraph)
+	common.RunTask(define.CrawlArticleTopic, define.CrawlArticleChannel, cast.ToUint(define.Config.ConsumerNum[`CrawlArticle`]), business.CrawlArticle)
+	common.RunTask(define.CrawlFeishuDocTopic, define.CrawlFeishuDocChannel, cast.ToUint(define.Config.ConsumerNum[`CrawlFeishuDoc`]), business.CrawlFeishuDoc)
+	common.RunTask(lib_define.AppPushMessage, lib_define.AppPushChannel, cast.ToUint(define.Config.ConsumerNum[`AppPushMessage`]), business.AppPush)
+	common.RunTask(lib_define.AppPushEvent, lib_define.AppPushChannel, cast.ToUint(define.Config.ConsumerNum[`AppPushEvent`]), business.AppPush)
+	common.RunTask(define.ExportTaskTopic, define.ExportTaskChannel, cast.ToUint(define.Config.ConsumerNum[`ExportTask`]), business.ExportTask)
+	common.RunTask(define.ExtractFaqFilesTopic, define.ExtractFaqFilesChannel, cast.ToUint(define.Config.ConsumerNum[`ExtractFaqFiles`]), business.ExtractFaqFiles)
+	common.RunTask(define.ImportFAQFileTopic, define.ImportFAQFileChannel, cast.ToUint(define.Config.ConsumerNum[`ImportLibFileFaq`]), business.ImportLibFileFaq)
+	common.RunTask(define.OfficialAccountDraftSyncTopic, define.OfficialAccountDraftSyncChannel, cast.ToUint(define.Config.ConsumerNum[`OfficialAccountDraftSync`]), business.OfficialAccountDraftSync)
+	common.RunTask(define.OfficialAccountHisArticleSyncTopic, define.OfficialAccountHisArticleSyncChannel, cast.ToUint(define.Config.ConsumerNum[`OfficialAccountHisArticleSync`]), business.OfficialAccountHisArticleSync)
+	common.RunTask(define.OfficialAccountBatchSendTopic, define.OfficialAccountBatchSendChannel, cast.ToUint(define.Config.ConsumerNum[`OfficialAccountBatchSend`]), business.OfficialAccountBatchSend)
+	common.RunTask(define.OfficialAccountCommentSyncTopic, define.OfficialAccountCommentSyncChannel, cast.ToUint(define.Config.ConsumerNum[`OfficialAccountCommentSync`]), business.OfficialAccountCommentSync)
+	common.RunTask(define.OfficialAccountCommentAiCheckTopic, define.OfficialAccountCommentAiCheckChannel, cast.ToUint(define.Config.ConsumerNum[`OfficialAccountCommentAiCheck`]), business.OfficialAccountCommentAiCheck)
+}
+
+func StartCronTasks() {
+	c := cron.New()
+	_, _ = c.AddFunc("@every 1m", func() { logs.Debug("cron test") })
+	_, _ = c.AddFunc("@every 1m", func() { business.RenewCrawl() })
+	_, _ = c.AddFunc("@every 1h", func() { business.DeleteFormEntry() })
+	_, _ = c.AddFunc("@every 1h", func() { business.DeleteExportFile() })
+	_, _ = c.AddFunc("@every 1h", func() { business.DeleteConvertHtml() })
+	_, _ = c.AddFunc("@every 1h", func() { business.DeleteClientSide() })
+	_, _ = c.AddFunc("@every 1h", func() { business.DeleteDownloadFile() })
+	_, _ = c.AddFunc("@every 15s", common.DeleteReceiver)
+	_, _ = c.AddFunc("@every 5s", func() { business.CheckAliOcrRequest() })
+	_, _ = c.AddFunc("0 0 * * *", func() { business.UpdateLibraryFileData() })
+	_, _ = c.AddFunc(`2 2 * * *`, business.DeleteLlmRequestLogs)
+	_, _ = c.AddFunc("0 3 * * *", manage.CronSyncOfficialContent)
+	_, _ = c.AddFunc("@every 1m", func() { business.UpdateBatchSendData() })
+	_, _ = c.AddFunc(`*/1 * * * *`, func() { //every minute 00
+		go work_flow.TriggerCronSelectTimeRun()
+	})
+	_, _ = c.AddFunc(`1 0 * * *`, func() { business.CheckRobotPaymentDurationAuthCode() })
+	_, _ = c.AddFunc(`@every 1m`, func() { business.CheckIsPublicNetwork() })
+	c.Start()
+	go work_flow.StartLoadCronTriggers()
+	logs.Debug("cron start")
+}
+
+//go:embed data/migrations/*.sql
+var embedMigrations embed.FS
+
+func PostgresTable() {
+	db, err := msql.GetDB(define.Postgres)
+	if err != nil {
+		panic(err)
+	}
+	goose.SetBaseFS(embedMigrations)
+	if err = goose.SetDialect(`postgres`); err != nil {
+		panic(err)
+	}
+	if err = goose.Up(db, `data/migrations`, goose.WithAllowMissing()); err != nil {
+		panic(err)
+	}
+
+	InitDefaultRole()
+	userId, insert, err := CreateDefaultUser()
+	if err != nil {
+		logs.Error(err.Error())
+	}
+	if insert {
+		CreateDefaultBaaiModel(userId)
+	}
+	common.SetNeo4jStatus(cast.ToInt(userId), cast.ToBool(define.Config.Neo4j["enabled"]))
+	InitRoleRootPermissions()
+	InitRoleUserPermissions()
+}
+
+func CreateDefaultUser() (int64, bool, error) {
+	m := msql.Model(define.TableUser, define.Postgres)
+	user, err := m.Where(`"user_name"`, define.DefaultUser).Find()
+	if err != nil {
+		panic(err)
+	}
+	if len(user) > 0 {
+		return cast.ToInt64(user["id"]), false, nil
+	}
+
+	salt := tool.Random(20)
+	id, err := msql.Model(define.TableUser, define.Postgres).Insert(msql.Datas{
+		`user_name`:   define.DefaultUser,
+		`nick_name`:   `admin`,
+		`salt`:        salt,
+		`password`:    tool.MD5(define.DefaultPasswd + salt),
+		`user_type`:   define.UserTypeAdmin,
+		`user_roles`:  define.DefaultUserRoleId,
+		`create_time`: tool.Time2Int(),
+		`update_time`: tool.Time2Int(),
+	}, "id")
+	if err != nil {
+		panic(err)
+	}
+	migrations.SyncHistoryPermissionData()
+	return id, true, nil
+}
+func CreateDefaultRole(userId int64) {
+	var defaultRole = []string{lib_define.DefaultRoleRoot, lib_define.DefaultRoleAdmin, lib_define.DefaultRoleUser}
+	for k, role := range defaultRole {
+		_, err := msql.Model(define.TableRole, define.Postgres).Insert(msql.Datas{
+			`name`:        role,
+			"role_type":   k + 1,
+			`create_name`: lib_define.System,
+			`create_time`: tool.Time2Int(),
+			`update_time`: tool.Time2Int(),
+		})
+		if err != nil {
+			logs.Error(`role create err:%s`, err.Error())
+		}
+		if userId <= 0 || role != lib_define.DefaultRoleRoot {
+			continue
+		}
+	}
+}
+
+func InitDefaultRole() {
+	rolesMap := map[int]string{
+		define.RoleTypeRoot:  lib_define.DefaultRoleRoot,
+		define.RoleTypeAdmin: lib_define.DefaultRoleAdmin,
+		define.RoleTypeUser:  lib_define.DefaultRoleUser,
+	}
+	for roleType, roleName := range rolesMap {
+		row, err := msql.Model(define.TableRole, define.Postgres).Where(`role_type`, cast.ToString(roleType)).Find()
+		if err != nil {
+			panic(err.Error())
+		}
+		if len(row) > 0 {
+			if roleType == define.RoleTypeRoot {
+				define.DefaultUserRoleId = cast.ToInt(row[`id`])
+			}
+			continue
+		}
+		id, err := msql.Model(define.TableRole, define.Postgres).Insert(msql.Datas{
+			`name`:        roleName,
+			`role_type`:   roleType,
+			`create_name`: lib_define.System,
+			`create_time`: tool.Time2Int(),
+			`update_time`: tool.Time2Int(),
+		}, `id`)
+		if roleType == define.RoleTypeRoot {
+			define.DefaultUserRoleId = cast.ToInt(id)
+		}
+	}
+}
+
+func CreateDefaultBaaiModel(userId int64) {
+	modelConfig, exist := common.GetModelConfigByDefine(define.LangEnUs, common.ModelBaai)
+	if !exist {
+		logs.Error(`modelConfig not found`)
+		return
+	}
+	_, err := msql.Model("chat_ai_model_config", define.Postgres).Insert(msql.Datas{
+		`admin_user_id`: userId,
+		`model_define`:  common.ModelBaai,
+		`model_types`:   strings.Join(modelConfig.SupportedType, `,`),
+		`api_endpoint`:  "http://host.docker.internal:50001",
+		`create_time`:   tool.Time2Int(),
+		`update_time`:   tool.Time2Int(),
+	})
+	if err != nil {
+		logs.Error("baai model create err:%s", err.Error())
+	}
+}
+
+func InitRoleRootPermissions() {
+	roles, err := msql.Model(define.TableRole, define.Postgres).
+		Where(`role_type`, `in`, fmt.Sprintf(`%d,%d`, define.RoleTypeRoot, define.RoleTypeAdmin)).
+		Field(`id,name,role_type`).
+		Select()
+	if err != nil {
+		panic(err.Error())
+	}
+
+	for _, role := range roles {
+
+		// reset role name
+		if cast.ToInt(role[`role_type`]) == define.RoleTypeRoot && role[`name`] != lib_define.DefaultRoleRoot {
+			_, err = msql.Model(define.TableRole, define.Postgres).Where(`id`, role[`id`]).Update(msql.Datas{`name`: lib_define.DefaultRoleRoot})
+			if err != nil {
+				panic(err.Error())
+			}
+		}
+		if cast.ToInt(role[`role_type`]) == define.RoleTypeAdmin && role[`name`] != lib_define.DefaultRoleAdmin {
+			_, err = msql.Model(define.TableRole, define.Postgres).Where(`id`, role[`id`]).Update(msql.Datas{`name`: lib_define.DefaultRoleAdmin})
+			if err != nil {
+				panic(err.Error())
+			}
+		}
+
+		// reset role permissions
+		_, err = casbin.Handler.DelRoleRules(role[`id`])
+		for _, item := range define.GetAllUniKeyList() {
+			_, err := casbin.Handler.AddPolicies([][]string{{role[`id`], item, "GET"}})
+			if err != nil {
+				panic(err.Error())
+			}
+		}
+	}
+}
+
+func InitRoleUserPermissions() {
+	roleInfo, err := msql.Model(define.TableRole, define.Postgres).Where(`role_type`, cast.ToString(define.RoleTypeUser)).Field(`id,name`).Find()
+	if err != nil {
+		panic(err.Error())
+	}
+	if len(roleInfo) == 0 {
+		panic(`no user role`)
+	}
+	if roleInfo[`name`] != lib_define.DefaultRoleUser {
+		_, err = msql.Model(define.TableRole, define.Postgres).Where(`id`, roleInfo[`id`]).Update(msql.Datas{`name`: lib_define.DefaultRoleUser})
+		if err != nil {
+			panic(err.Error())
+		}
+	}
+	rolePermissions := make([][]string, 0)
+	_, err = casbin.Handler.DelRoleRules(roleInfo[`id`])
+	for _, item := range define.UserUniKeyList {
+		rolePermissions = append(rolePermissions, []string{roleInfo[`id`], item, "GET"})
+		_, err := casbin.Handler.AddPolicies([][]string{{roleInfo[`id`], item, "GET"}})
+		if err != nil {
+			panic(err.Error())
+		}
+	}
+}

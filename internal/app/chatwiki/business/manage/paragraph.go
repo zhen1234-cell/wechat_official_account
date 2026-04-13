@@ -1,0 +1,1070 @@
+// Copyright © 2016- 2025 Wuhan Sesame Small Customer Service Network Technology Co., Ltd.
+
+package manage
+
+import (
+	"chatwiki/internal/app/chatwiki/common"
+	"chatwiki/internal/app/chatwiki/define"
+	"chatwiki/internal/app/chatwiki/i18n"
+	"chatwiki/internal/app/chatwiki/middlewares"
+	"chatwiki/internal/pkg/lib_define"
+	"chatwiki/internal/pkg/lib_web"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/spf13/cast"
+	"github.com/zhimaAi/go_tools/curl"
+	"github.com/zhimaAi/go_tools/logs"
+	"github.com/zhimaAi/go_tools/msql"
+	"github.com/zhimaAi/go_tools/tool"
+	"github.com/zhimaAi/llm_adaptor/adaptor"
+)
+
+func GetParagraphList(c *gin.Context) {
+	var adminUserId int
+	if adminUserId = GetAdminUserId(c); adminUserId == 0 {
+		return
+	}
+	userId := getLoginUserId(c)
+	if userId <= 0 {
+		common.FmtErrorWithCode(c, http.StatusUnauthorized, `user_no_login`)
+		return
+	}
+	req := BridgeGetParagraphListReq{}
+	err := common.RequestParamsBind(&req, c)
+	if err != nil {
+		common.FmtError(c, `param_err`, middlewares.GetValidateErr(req, err, common.GetLang(c)).Error())
+		return
+	}
+	req.Status = c.DefaultQuery(`status`, `-1`)
+	req.GraphStatus = c.DefaultQuery(`graph_status`, `-1`)
+	req.CategoryId = c.DefaultQuery(`category_id`, `-1`)
+	req.GroupId = c.DefaultQuery(`group_id`, `-1`)
+	data, httpStatus, err := BridgeGetParagraphList(adminUserId, userId, common.GetLang(c), &req)
+	common.FmtBridgeResponse(c, data, httpStatus, err)
+}
+
+func GetParagraphCount(c *gin.Context) {
+	var userId int
+	if userId = GetAdminUserId(c); userId == 0 {
+		return
+	}
+	fileId := cast.ToInt(c.Query(`file_id`))
+	if fileId <= 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_lack`))))
+		return
+	}
+	info, err := common.GetLibFileInfo(fileId, userId)
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+	if len(info) == 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `no_data`))))
+		return
+	}
+	var (
+		paraIds []string
+	)
+	search := cast.ToString(c.Query(`search`))
+	if len(search) > 0 {
+		paraIds, err = common.GetMatchFileParagraphIdsByFullTextSearch(search, cast.ToString(fileId))
+		if err != nil {
+			logs.Error(`GetMatchFileParagraphIdsByFullTextSearch err:%v`, err)
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+			return
+		}
+	}
+	query := msql.Model(`chat_ai_library_file_data`, define.Postgres).
+		Alias("a").
+		Join("chat_ai_library_file_data_index b", "a.id=b.data_id", "inner").
+		Where(`a.admin_user_id`, cast.ToString(userId)).Where(`a.file_id`, cast.ToString(fileId)).
+		Where(`a.isolated`, "false").
+		Where(`a.delete_time`, `0`).
+		Field(`a.split_status,b.status`)
+	if len(paraIds) > 0 {
+		query.Where(`b.id`, `in`, strings.Join(paraIds, `,`))
+	}
+	list, err := query.Select()
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+
+	var formatedList = map[string]int{
+		`total`:                    0,
+		`vector_status_initial`:    0,
+		`vector_status_converted`:  0,
+		`vector_status_exception`:  0,
+		`vector_status_converting`: 0,
+		`split_status_exception`:   0,
+	}
+	for _, item := range list {
+		formatedList[`total`] += 1
+		switch cast.ToInt(item[`split_status`]) {
+		case define.SplitStatusException:
+			formatedList[`split_status_exception`] += 1
+			continue
+		}
+		switch cast.ToInt(item[`status`]) {
+		case define.VectorStatusInitial:
+			formatedList[`vector_status_initial`] += 1
+		case define.VectorStatusConverted:
+			formatedList[`vector_status_converted`] += 1
+		case define.VectorStatusConverting:
+			formatedList[`vector_status_converting`] += 1
+		default:
+			formatedList[`vector_status_exception`] += 1
+		}
+	}
+
+	c.String(http.StatusOK, lib_web.FmtJson(formatedList, nil))
+}
+
+func GetCategoryParagraphList(c *gin.Context) {
+	var userId int
+	if userId = GetAdminUserId(c); userId == 0 {
+		return
+	}
+
+	page := max(1, cast.ToInt(c.Query(`page`)))
+	size := max(1, cast.ToInt(c.Query(`size`)))
+	libraryId := cast.ToInt(c.Query(`library_id`))
+	status := cast.ToInt(c.Query(`status`))
+	categoryId := cast.ToInt(c.Query(`category_id`))
+	library, err := common.GetLibraryInfo(libraryId, userId)
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+	if len(library) == 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `no_data`))))
+		return
+	}
+
+	query := msql.Model(`chat_ai_library_file_data`, define.Postgres).
+		Alias("a").
+		Join(`chat_ai_library_file f`, `a.file_id=f.id`, `left`).
+		Join("chat_ai_library_file_data_index b", "a.id=b.data_id", "inner").
+		Where(`a.admin_user_id`, cast.ToString(userId)).Where(`a.library_id`, cast.ToString(libraryId)).
+		Where(`a.category_id`, `>`, `0`).
+		Where(`a.delete_time`, `0`).
+		Field(`a.*,f.file_name`).
+		Field(`
+			CASE 
+    			WHEN bool_or(b.status = 2) THEN 2
+    			WHEN bool_or(b.status = 3) THEN 3
+    			WHEN bool_and(b.status = 0) THEN 0
+    			WHEN bool_and(b.status = 1) THEN 1
+    			ELSE 3
+			END AS status		
+		`).
+		Field(`
+			COALESCE(
+    			(SELECT errmsg FROM chat_ai_library_file_data_index WHERE data_id = a.id AND errmsg IS NOT NULL LIMIT 1),
+    			'no error'
+  			) AS errmsg
+		`).
+		Group(`a.id,f.file_name`).
+		Order(`a.create_time asc`)
+	if status >= 0 {
+		query.Where(`b.status`, cast.ToString(status))
+	}
+	if categoryId >= 0 {
+		query.Where(`a.category_id`, cast.ToString(categoryId))
+	}
+	list, total, err := query.Paginate(page, size)
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+
+	var formatedList []map[string]any
+	for _, item := range list {
+		tempItem := make(map[string]any)
+		for k, v := range item {
+			tempItem[k] = v
+		}
+
+		var images []string
+		err = json.Unmarshal([]byte(item[`images`]), &images)
+		if err != nil {
+			continue
+		}
+		tempItem[`images`] = images
+		formatedList = append(formatedList, tempItem)
+	}
+
+	data := map[string]any{`info`: library, `list`: formatedList, `total`: total, `page`: page, `size`: size}
+	c.String(http.StatusOK, lib_web.FmtJson(data, nil))
+}
+
+func SaveCategoryParagraph(c *gin.Context) {
+	var userId int
+	if userId = GetAdminUserId(c); userId == 0 {
+		return
+	}
+	id := cast.ToInt64(c.PostForm(`id`))
+	libraryId := cast.ToInt(c.PostForm(`library_id`))
+	title := strings.TrimSpace(c.PostForm(`title`))
+	content := strings.TrimSpace(c.PostForm(`content`))
+	question := strings.TrimSpace(c.PostForm(`question`))
+	similarQuestions := strings.TrimSpace(c.PostForm(`similar_questions`))
+	answer := strings.TrimSpace(c.PostForm(`answer`))
+	images := c.PostFormArray(`images`)
+	categoryId := cast.ToInt(c.PostForm(`category_id`))
+	if id < 0 || libraryId < 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_lack`))))
+		return
+	}
+	library, err := common.GetLibraryInfo(libraryId, userId)
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, err))
+		return
+	}
+
+	m := msql.Model(`chat_ai_library_file_data`, define.Postgres)
+	if id > 0 {
+		data, err := m.Where(`id`, cast.ToString(id)).Where(`admin_user_id`, cast.ToString(userId)).Find()
+		if err != nil {
+			logs.Error(err.Error())
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+			return
+		}
+		if len(data) == 0 {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `no_data`))))
+			return
+		}
+	}
+
+	if cast.ToInt(library[`type`]) == define.QALibraryType {
+		if len(question) < 1 || utf8.RuneCountInString(question) > common.MaxContent {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `length_error`))))
+			return
+		}
+		if len(answer) < 1 || utf8.RuneCountInString(answer) > common.MaxContent {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `length_error`))))
+			return
+		}
+	} else {
+		if len(content) < 1 || utf8.RuneCountInString(content) > common.MaxContent {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `length_error`))))
+			return
+		}
+	}
+	jsonImages, err := common.CheckLibraryImage(images)
+	if err != nil {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `images`))))
+		return
+	}
+
+	_ = m.Begin()
+	data := msql.Datas{
+		`admin_user_id`: userId,
+		`library_id`:    libraryId,
+		`title`:         title,
+		`images`:        jsonImages,
+		`category_id`:   categoryId,
+		`update_time`:   tool.Time2Int(),
+	}
+	var vectorIds []int64
+	if cast.ToInt(library[`type`]) == define.QALibraryType {
+		data[`word_total`] = utf8.RuneCountInString(question + answer)
+		data[`question`] = question
+		data[`similar_questions`] = similarQuestions
+		data[`answer`] = answer
+		if id > 0 {
+			_, err = m.Where(`id`, cast.ToString(id)).Update(data)
+		} else {
+			data[`type`] = define.ParagraphTypeDocQA
+			data[`create_time`] = data[`update_time`]
+			id, err = m.Insert(data, `id`)
+		}
+		if err != nil {
+			logs.Error(err.Error())
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+			_ = m.Rollback()
+			return
+		}
+		vectorID, err := common.SaveVector(int64(userId), cast.ToInt64(libraryId), 0, id, cast.ToString(define.VectorTypeQuestion), question)
+		if err != nil {
+			logs.Error(err.Error())
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+			_ = m.Rollback()
+			return
+		}
+		vectorIds = append(vectorIds, vectorID)
+
+		vectorID, err = common.SaveVector(int64(userId), cast.ToInt64(libraryId), 0, id, cast.ToString(define.VectorTypeAnswer), question)
+		if err != nil {
+			logs.Error(err.Error())
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+			_ = m.Rollback()
+			return
+		}
+		vectorIds = append(vectorIds, vectorID)
+	} else {
+		data[`word_total`] = utf8.RuneCountInString(content)
+		data[`content`] = content
+		if id > 0 {
+			_, err = m.Where(`id`, cast.ToString(id)).Update(data)
+		} else {
+			data[`type`] = define.ParagraphTypeNormal
+			data[`create_time`] = data[`update_time`]
+			id, err = m.Insert(data, `id`)
+		}
+		if err != nil {
+			logs.Error(err.Error())
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+			_ = m.Rollback()
+			return
+		}
+		vectorID, err := common.SaveVector(int64(userId), cast.ToInt64(libraryId), 0, id, cast.ToString(define.VectorTypeParagraph), content)
+		if err != nil {
+			logs.Error(err.Error())
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+			_ = m.Rollback()
+			return
+		}
+		vectorIds = append(vectorIds, vectorID)
+	}
+	err = m.Commit()
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+
+	//async task:convert vector
+	for _, id := range vectorIds {
+		if message, err := tool.JsonEncode(map[string]any{`id`: id, `file_id`: 0}); err != nil {
+			logs.Error(err.Error())
+			continue
+		} else {
+			if err = common.AddJobs(define.ConvertVectorTopic, message); err != nil {
+				logs.Error(err.Error())
+			}
+		}
+	}
+
+	c.String(http.StatusOK, lib_web.FmtJson(nil, nil))
+}
+
+func getParagraphAddNumber(c *gin.Context, fileId int64) int {
+	if number := cast.ToInt(c.PostForm(`number`)); number > 0 {
+		return number
+	}
+	maxNumber, _ := msql.Model(`chat_ai_library_file_data`, define.Postgres).
+		Where(`file_id`, cast.ToString(fileId)).Max(`number`)
+	return cast.ToInt(maxNumber) + 1
+}
+
+func getLibraryDefaultFile(lang string, libraryId, adminUserId int, token string) (int64, error) {
+	params := map[string]string{
+		`admin_user_id`: cast.ToString(adminUserId),
+		`library_id`:    cast.ToString(libraryId),
+		`doc_type`:      cast.ToString(define.DocTypeCustom),
+		`file_name`:     lib_define.DefaultCustomDocument,
+		`is_qa_doc`:     cast.ToString(define.DocTypeQa),
+		`qa_index_type`: cast.ToString(define.QAIndexTypeQuestionAndAnswer),
+	}
+	m := msql.Model(`chat_ai_library_file`, define.Postgres)
+	request := curl.Post(fmt.Sprintf(`http://127.0.0.1:%s/manage/addLibraryFile`, define.Config.WebService[`port`])).
+		Header(`token`, token).Header(`lang`, lang)
+	for field, value := range params {
+		m.Where(field, value)
+		request.Param(field, value)
+	}
+	fileIdStr, err := m.Value(`id`)
+	if err != nil {
+		logs.Error(`sql:%s,err:%s`, m.GetLastSql(), err.Error())
+		return 0, err
+	}
+	if fileId := cast.ToInt64(fileIdStr); fileId > 0 {
+		return fileId, nil
+	}
+	var res lib_web.Response
+	if err = request.ToJSON(&res); err != nil || cast.ToInt(res.Res) != define.StatusOK {
+		err = fmt.Errorf(`create default custom document failed:%s(%v)`, res.Msg, err)
+		logs.Error(err.Error())
+		return 0, err
+	}
+	fileIds := cast.ToSlice(cast.ToStringMap(res.Data)[`file_ids`])
+	if len(fileIds) == 0 || cast.ToInt64(fileIds[0]) <= 0 {
+		err = fmt.Errorf(`create default custom document failed:%s`, tool.JsonEncodeNoError(res))
+		logs.Error(err.Error())
+		return 0, err
+	}
+	return cast.ToInt64(fileIds[0]), nil
+}
+
+func SaveParagraph(c *gin.Context) {
+	var adminUserId int
+	if adminUserId = GetAdminUserId(c); adminUserId == 0 {
+		return
+	}
+	userId := getLoginUserId(c)
+	if userId <= 0 {
+		common.FmtErrorWithCode(c, http.StatusUnauthorized, `user_no_login`)
+		return
+	}
+	//bind post
+	req := BridgeSaveParagraphReq{}
+	err := common.RequestParamsBind(&req, c)
+	if err != nil {
+		common.FmtError(c, `param_err`, middlewares.GetValidateErr(req, err, common.GetLang(c)).Error())
+		return
+	}
+	err = common.RequestParamsBind(&req, c, http.MethodGet)
+	if err != nil {
+		common.FmtError(c, `param_err`, middlewares.GetValidateErr(req, err, common.GetLang(c)).Error())
+		return
+	}
+	req.HeaderToken = c.GetHeader(`token`)
+	data, httpStatus, err := BridgeSaveParagraph(adminUserId, userId, common.GetLang(c), &req)
+	common.FmtBridgeResponse(c, data, httpStatus, err)
+}
+
+// SaveParagraphMetadata bulk saves custom metadata for paragraphs (chat_ai_library_file_data)
+// Parameters (POST):
+// - ids: paragraph ID list (comma-separated)
+// - list: JSON array [{"key":"key_1","value":"xxx"}, ...] (only custom key_xxx allowed; built-in keys are ignored)
+func SaveParagraphMetadata(c *gin.Context) {
+	var adminUserId int
+	if adminUserId = GetAdminUserId(c); adminUserId == 0 {
+		return
+	}
+	ids := strings.TrimSpace(c.PostForm(`ids`))
+	if !common.CheckIds(ids) {
+		common.FmtError(c, `param_err`)
+		return
+	}
+	listRaw := strings.TrimSpace(c.PostForm(`list`))
+	if listRaw == `` || listRaw == `[]` || listRaw == `null` || listRaw == `{}` {
+		common.FmtError(c, `param_lack`)
+		return
+	}
+	type MetaKV struct {
+		Key   string `json:"key"`
+		Value any    `json:"value"`
+	}
+	reqList := make([]MetaKV, 0)
+	if err := tool.JsonDecodeUseNumber(listRaw, &reqList); err != nil || len(reqList) == 0 {
+		common.FmtError(c, `param_err`)
+		return
+	}
+	updateMap := make(map[string]any, len(reqList))
+	keySet := make(map[string]struct{}, len(reqList))
+	for _, it := range reqList {
+		k := strings.TrimSpace(it.Key)
+		if k == `` {
+			continue
+		}
+		//Built-in metadata has fixed values: modifications are not allowed (ignored)
+		if define.IsBuiltinMetaKey(k) {
+			continue
+		}
+		updateMap[k] = cast.ToString(it.Value)
+		keySet[k] = struct{}{}
+	}
+	if len(updateMap) == 0 {
+		common.FmtOk(c, nil)
+		return
+	}
+
+	paras, err := msql.Model(`chat_ai_library_file_data`, define.Postgres).
+		Where(`admin_user_id`, cast.ToString(adminUserId)).
+		Where(`id`, `in`, ids).
+		Where(`delete_time`, `0`).
+		Field(`id,library_id,metadata`).
+		Select()
+	if err != nil {
+		logs.Error(err.Error())
+		common.FmtError(c, `sys_err`)
+		return
+	}
+	if len(paras) == 0 {
+		common.FmtError(c, `no_data`)
+		return
+	}
+
+	//Strict validation: all ids in the request must exist; otherwise reject partial updates
+	idArr := strings.Split(ids, ",")
+	existSet := make(map[string]struct{}, len(paras))
+	libIdSet := make(map[int]struct{}, len(paras))
+	for _, p := range paras {
+		existSet[p[`id`]] = struct{}{}
+		libIdSet[cast.ToInt(p[`library_id`])] = struct{}{}
+	}
+	for _, idStr := range idArr {
+		if _, ok := existSet[idStr]; !ok {
+			common.FmtError(c, `no_data`)
+			return
+		}
+	}
+
+	//Validate that every key exists in the custom meta schema of each involved library
+	libIdList := make([]string, 0, len(libIdSet))
+	for lid := range libIdSet {
+		if lid > 0 {
+			libIdList = append(libIdList, cast.ToString(lid))
+		}
+	}
+	if len(libIdList) > 0 {
+		keyList := make([]string, 0, len(keySet))
+		for k := range keySet {
+			keyList = append(keyList, k)
+		}
+		okRows, err := msql.Model(`library_meta_schema`, define.Postgres).
+			Where(`admin_user_id`, cast.ToString(adminUserId)).
+			Where(`library_id`, `in`, strings.Join(libIdList, `,`)).
+			Where(`key`, `in`, strings.Join(keyList, `,`)).
+			Field(`library_id,key`).
+			Select()
+		if err != nil {
+			logs.Error(err.Error())
+			common.FmtError(c, `sys_err`)
+			return
+		}
+		okSet := make(map[int]map[string]struct{}, len(libIdSet))
+		for _, r := range okRows {
+			lid := cast.ToInt(r[`library_id`])
+			k := strings.TrimSpace(r[`key`])
+			if k == `` || lid <= 0 {
+				continue
+			}
+			if _, ok := okSet[lid]; !ok {
+				okSet[lid] = make(map[string]struct{})
+			}
+			okSet[lid][k] = struct{}{}
+		}
+		for lid := range libIdSet {
+			if len(okSet[lid]) != len(keySet) {
+				common.FmtError(c, `param_err`)
+				return
+			}
+		}
+	}
+
+	//Merge and write back one by one (only update these keys in metadata)
+	now := tool.Time2Int()
+	m := msql.Model(`chat_ai_library_file_data`, define.Postgres)
+	for _, p := range paras {
+		metaMap := make(map[string]any)
+		metaStr := strings.TrimSpace(cast.ToString(p[`metadata`]))
+		if metaStr == `` {
+			metaStr = `{}`
+		}
+		_ = tool.JsonDecode(metaStr, &metaMap)
+		for k, v := range updateMap {
+			metaMap[k] = v
+		}
+		metaJson, err := tool.JsonEncode(metaMap)
+		if err != nil {
+			logs.Error(err.Error())
+			common.FmtError(c, `sys_err`)
+			return
+		}
+		if _, err := m.Where(`admin_user_id`, cast.ToString(adminUserId)).
+			Where(`id`, cast.ToString(p[`id`])).
+			Update(msql.Datas{`metadata`: metaJson, `update_time`: now}); err != nil {
+			logs.Error(err.Error())
+			common.FmtError(c, `sys_err`)
+			return
+		}
+	}
+	common.FmtOk(c, nil)
+}
+
+func SetParagraphGroup(c *gin.Context) {
+	var userId int
+	if userId = GetAdminUserId(c); userId == 0 {
+		return
+	}
+	ids := strings.TrimSpace(c.PostForm(`ids`))
+	groupId := cast.ToUint(c.PostForm(`group_id`))
+	if !common.CheckIds(ids) {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `ids`))))
+		return
+	}
+	data := msql.Datas{`group_id`: groupId, `update_time`: tool.Time2Int()}
+	m := msql.Model(`chat_ai_library_file_data`, define.Postgres)
+	affect, err := m.Where(`admin_user_id`, cast.ToString(userId)).Where(`id`, `in`, ids).Update(data)
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+	c.String(http.StatusOK, lib_web.FmtJson(affect, nil))
+}
+
+func SaveSplitParagraph(c *gin.Context) {
+	var adminUserId int
+	if adminUserId = GetAdminUserId(c); adminUserId == 0 {
+		return
+	}
+	id := cast.ToInt64(c.PostForm(`data_id`))
+	fileId := cast.ToInt64(c.PostForm(`file_id`))
+	categoryId := cast.ToInt(c.PostForm(`category_id`))
+	similarQuestions := cast.ToInt(c.PostForm(`similar_questions`))
+	if id < 0 || fileId < 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_lack`))))
+		return
+	}
+	list := make(define.DocSplitItems, 0)
+	if err := tool.JsonDecodeUseNumber(c.PostForm(`list`), &list); err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `list`))))
+		return
+	}
+	for i, item := range list {
+		if item.Images == nil {
+			list[i].Images = make([]string, 0) //initialize to avoid nil after JSON
+		}
+		if _, err := common.CheckLibraryImage(item.Images); err != nil {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `images`))))
+			return
+		}
+	}
+	fileInfo, err := common.GetLibFileInfo(int(fileId), adminUserId)
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+	if len(fileInfo) == 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `no_data`))))
+		return
+	}
+	m := msql.Model(`chat_ai_library_file_data`, define.Postgres)
+	paragraph, err := m.Where(`admin_user_id`, cast.ToString(adminUserId)).
+		Where(`file_id`, cast.ToString(fileId)).Where(`id`, cast.ToString(id)).Find()
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+	//Database processing
+	_ = m.Begin()
+	list, err = common.SaveSplitParagraph(adminUserId, cast.ToInt(fileId), paragraph, list)
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, err))
+		_ = m.Rollback()
+		return
+	}
+	var vectorIds []int64
+	for _, item := range list {
+		data := msql.Datas{
+			`admin_user_id`: adminUserId,
+			`library_id`:    fileInfo[`library_id`],
+			`file_id`:       fileId,
+			`number`:        item.Number,
+			`title`:         item.Title,
+			`images`:        tool.JsonEncodeNoError(item.Images),
+			`category_id`:   categoryId,
+			`update_time`:   tool.Time2Int(),
+			//Parent/child segments
+			`father_chunk_paragraph_number`: item.FatherChunkParagraphNumber,
+		}
+		if cast.ToInt(fileInfo[`is_qa_doc`]) == define.DocTypeQa {
+			data[`word_total`] = utf8.RuneCountInString(item.Question + item.Answer)
+			data[`content`] = ``
+			data[`question`] = item.Question
+			data[`answer`] = item.Answer
+			data[`similar_questions`] = similarQuestions
+			data[`type`] = define.ParagraphTypeDocQA
+			data[`create_time`] = data[`update_time`]
+			id, err = m.Insert(data, `id`)
+			if err != nil {
+				logs.Error(err.Error())
+				c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+				_ = m.Rollback()
+				return
+			}
+			vectorID, err := common.SaveVector(int64(adminUserId), cast.ToInt64(fileInfo[`library_id`]),
+				fileId, id, cast.ToString(define.VectorTypeQuestion), item.Question)
+			if err != nil {
+				logs.Error(err.Error())
+				c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+				_ = m.Rollback()
+				return
+			}
+			vectorIds = append(vectorIds, vectorID)
+			if fileInfo[`type`] == cast.ToString(define.QAIndexTypeQuestionAndAnswer) {
+				vectorID, err = common.SaveVector(int64(adminUserId), cast.ToInt64(fileInfo[`library_id`]),
+					fileId, id, cast.ToString(define.VectorTypeAnswer), item.Question)
+				if err != nil {
+					logs.Error(err.Error())
+					c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+					_ = m.Rollback()
+					return
+				}
+				vectorIds = append(vectorIds, vectorID)
+			}
+		} else {
+			data[`word_total`] = utf8.RuneCountInString(item.Content)
+			data[`content`] = item.Content
+			data[`question`] = ``
+			data[`answer`] = ``
+			data[`type`] = define.ParagraphTypeNormal
+			data[`create_time`] = data[`update_time`]
+			data[`page_num`] = item.PageNum
+			id, err = m.Insert(data, `id`)
+			if err != nil {
+				logs.Error(err.Error())
+				c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+				_ = m.Rollback()
+				return
+			}
+			vectorID, err := common.SaveVector(int64(adminUserId), cast.ToInt64(fileInfo[`library_id`]),
+				fileId, id, cast.ToString(define.VectorTypeParagraph), item.Content)
+			if err != nil {
+				logs.Error(err.Error())
+				c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+				_ = m.Rollback()
+				return
+			}
+			vectorIds = append(vectorIds, vectorID)
+		}
+
+	}
+	err = m.Commit()
+	if err != nil {
+		logs.Error(err.Error())
+		m.Rollback()
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+	//PDF single-page re-splitting compatibility: refresh numbering for all segments
+	if len(paragraph) == 0 {
+		common.RefreshParagraphNumbers(fileId)
+	}
+	//async task:convert vector
+	for _, id := range vectorIds {
+		if message, err := tool.JsonEncode(map[string]any{`id`: id, `file_id`: fileId}); err != nil {
+			logs.Error(err.Error())
+			continue
+		} else {
+			if err = common.AddJobs(define.ConvertVectorTopic, message); err != nil {
+				logs.Error(err.Error())
+			}
+		}
+	}
+
+	if common.GetNeo4jStatus(adminUserId) {
+		message, err := tool.JsonEncode(map[string]any{`id`: id, `file_id`: fileId})
+		if err != nil {
+			logs.Error(err.Error())
+		} else {
+			if err = common.AddJobs(define.ConvertGraphTopic, message); err != nil {
+				logs.Error(err.Error())
+			}
+		}
+	}
+	c.String(http.StatusOK, lib_web.FmtJson(list, nil))
+}
+
+func GetSplitParagraph(c *gin.Context) {
+	var adminUserId int
+	if adminUserId = GetAdminUserId(c); adminUserId == 0 {
+		return
+	}
+	dataIds := cast.ToString(c.Query(`data_ids`))
+	fileId := cast.ToInt(c.Query(`file_id`))
+	if len(dataIds) <= 0 || fileId <= 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_lack`))))
+		return
+	}
+	pdfPageNum := cast.ToInt(c.Query(`pdf_page_num`))
+	if pdfPageNum < 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_lack`))))
+		return
+	}
+	splitParams := define.SplitParams{
+		IsDiySplit:                 cast.ToInt(c.Query(`is_diy_split`)),
+		SeparatorsNo:               strings.TrimSpace(c.Query(`separators_no`)),
+		Separators:                 make([]string, 0),
+		ChunkSize:                  cast.ToInt(c.Query(`chunk_size`)),
+		ChunkOverlap:               cast.ToInt(c.Query(`chunk_overlap`)),
+		IsQaDoc:                    cast.ToInt(c.Query(`is_qa_doc`)),
+		QuestionLable:              strings.TrimSpace(c.Query(`question_lable`)),
+		SimilarLabel:               strings.TrimSpace(c.Query(`similar_label`)),
+		AnswerLable:                strings.TrimSpace(c.Query(`answer_lable`)),
+		QuestionColumn:             strings.TrimSpace(c.Query(`question_column`)),
+		SimilarColumn:              strings.TrimSpace(c.Query(`similar_column`)),
+		AnswerColumn:               strings.TrimSpace(c.Query(`answer_column`)),
+		EnableExtractImage:         cast.ToBool(c.Query(`enable_extract_image`)),
+		ChunkType:                  cast.ToInt(c.Query(`chunk_type`)),
+		SemanticChunkSize:          cast.ToInt(c.Query(`semantic_chunk_size`)),
+		SemanticChunkOverlap:       cast.ToInt(c.Query(`semantic_chunk_overlap`)),
+		SemanticChunkThreshold:     cast.ToInt(c.Query(`semantic_chunk_threshold`)),
+		SemanticChunkModelConfigId: cast.ToInt(c.Query(`semantic_chunk_model_config_id`)),
+		SemanticChunkUseModel:      strings.TrimSpace(c.Query(`semantic_chunk_use_model`)),
+		AiChunkPrumpt:              cast.ToString(c.Query(`ai_chunk_prumpt`)),
+		AiChunkModel:               strings.TrimSpace(c.Query(`ai_chunk_model`)),
+		AiChunkModelConfigId:       cast.ToInt(c.Query(`ai_chunk_model_config_id`)),
+		AiChunkSize:                cast.ToInt(c.Query(`ai_chunk_size`)),
+		AiChunkTaskId:              strings.TrimSpace(c.Query(`ai_chunk_task_id`)),
+		ParagraphChunk:             true,
+		NotMergedText:              cast.ToBool(c.Query(`not_merged_text`)),
+		FatherChunkParagraphType:   cast.ToInt(c.Query(`father_chunk_paragraph_type`)),
+		FatherChunkSeparatorsNo:    strings.TrimSpace(c.Query(`father_chunk_separators_no`)),
+		FatherChunkChunkSize:       cast.ToInt(c.Query(`father_chunk_chunk_size`)),
+		SonChunkSeparatorsNo:       strings.TrimSpace(c.Query(`son_chunk_separators_no`)),
+		SonChunkChunkSize:          cast.ToInt(c.Query(`son_chunk_chunk_size`)),
+	}
+	if splitParams.ChunkType == define.ChunkTypeSemantic {
+		if splitParams.SemanticChunkModelConfigId <= 0 {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `semantic_chunk_model_config_id`))))
+			return
+		}
+		if len(splitParams.SemanticChunkUseModel) == 0 {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `semantic_chunk_use_model`))))
+			return
+		}
+	} else if splitParams.ChunkType == define.ChunkTypeAi {
+		if ok := common.CheckModelIsValid(adminUserId, splitParams.AiChunkModelConfigId, splitParams.AiChunkModel, common.Llm); !ok {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `ai_chunk_model`))))
+			return
+		}
+		if len(splitParams.AiChunkPrumpt) == 0 || len(splitParams.AiChunkPrumpt) > 500 {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `ai_chunk_prumpt`))))
+			return
+		}
+		splitParams.AiChunkTaskId = uuid.New().String()
+		splitParams.AiChunkNew = true
+	} else if splitParams.ChunkType == define.ChunkTypeFatherSon {
+		if !tool.InArrayInt(splitParams.FatherChunkParagraphType, []int{define.FatherChunkParagraphTypeFullText, define.FatherChunkParagraphTypeSection}) {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `father_chunk_paragraph_type`))))
+			return
+		}
+		if splitParams.FatherChunkParagraphType != define.FatherChunkParagraphTypeFullText {
+			if len(splitParams.FatherChunkSeparatorsNo) == 0 {
+				c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `father_chunk_separators_no`))))
+				return
+			}
+			if splitParams.FatherChunkChunkSize < 0 {
+				c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `father_chunk_chunk_size`))))
+				return
+			}
+		}
+		if len(splitParams.SonChunkSeparatorsNo) == 0 {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `son_chunk_separators_no`))))
+			return
+		}
+		if splitParams.SonChunkChunkSize < 0 {
+			c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_invalid`, `son_chunk_chunk_size`))))
+			return
+		}
+	}
+
+	list, wordTotal, splitParams, err := common.GetParagraphSplit(adminUserId, fileId, pdfPageNum, dataIds, splitParams, common.GetLang(c))
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, err))
+		return
+	}
+	data := map[string]any{`split_params`: splitParams, `list`: list, `word_total`: wordTotal}
+	c.String(http.StatusOK, lib_web.FmtJson(data, nil))
+}
+
+func DeleteParagraph(c *gin.Context) {
+	var userId int
+	if userId = GetAdminUserId(c); userId == 0 {
+		return
+	}
+	ids := cast.ToString(c.PostForm(`id`))
+
+	err := BridgeDeleteParagraph(userId, ids, common.GetLang(c))
+	c.String(http.StatusOK, lib_web.FmtJson(nil, err))
+	return
+}
+
+func UpdateParagraphCategory(c *gin.Context) {
+	var userId int
+	if userId = GetAdminUserId(c); userId == 0 {
+		return
+	}
+	id := cast.ToInt(c.PostForm(`id`))
+	categoryId := cast.ToInt(c.PostForm(`category_id`))
+	if id <= 0 || categoryId < 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_lack`))))
+		return
+	}
+	data, err := msql.Model(`chat_ai_library_file_data`, define.Postgres).
+		Where(`admin_user_id`, cast.ToString(userId)).
+		Where(`delete_time`, `0`).
+		Where(`id`, cast.ToString(id)).
+		Find()
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+	if len(data) == 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `no_data`))))
+		return
+	}
+
+	_, err = msql.Model(`chat_ai_library_file_data`, define.Postgres).
+		Where(`id`, cast.ToString(id)).
+		Update(msql.Datas{`category_id`: categoryId})
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+
+	if cast.ToBool(data[`isolated`]) {
+		DeleteParagraph(c)
+		return
+	}
+
+	c.String(http.StatusOK, lib_web.FmtJson(nil, nil))
+}
+
+func MergeParagraph(c *gin.Context) {
+	var userId int
+	if userId = GetAdminUserId(c); userId == 0 {
+		return
+	}
+	libraryId := cast.ToInt64(c.PostForm(`library_id`))
+	//source merge to target
+	sourceDataId := cast.ToInt64(c.PostForm(`source_data_id`))
+	targetDataId := cast.ToInt64(c.PostForm(`target_data_id`))
+	if libraryId <= 0 || sourceDataId <= 0 || targetDataId <= 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_lack`))))
+		return
+	}
+
+	err := BridgeMergeParagraph(userId, libraryId, sourceDataId, targetDataId, common.GetLang(c))
+	c.String(http.StatusOK, lib_web.FmtJson(nil, err))
+}
+
+func GenerateSimilarQuestions(c *gin.Context) {
+	var userId int
+	if userId = GetAdminUserId(c); userId == 0 {
+		return
+	}
+	libraryId := cast.ToInt(c.PostForm(`library_id`))
+	modelConfigId := cast.ToInt(c.PostForm(`model_config_id`))
+	useModel := cast.ToString(c.PostForm(`use_model`))
+	question := strings.TrimSpace(c.PostForm(`question`))
+	answer := strings.TrimSpace(c.PostForm(`answer`))
+	num := cast.ToInt(c.PostForm(`num`))
+	if libraryId == 0 || modelConfigId == 0 || len(useModel) == 0 || len(question) == 0 || len(answer) == 0 || num <= 0 || num > 20 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `param_lack`))))
+		return
+	}
+
+	library, err := common.GetLibraryInfo(libraryId, userId)
+	if len(library) == 0 {
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `no_data`))))
+		return
+	}
+
+	// check conf
+	if !common.CheckModelIsValid(userId, modelConfigId, useModel, common.Llm) {
+		common.FmtError(c, `param_invalid`, `use_model`)
+		return
+	}
+
+	prompt := strings.ReplaceAll(define.PromptGenerateSimilarQuestions, `{{num}}`, cast.ToString(num))
+	prompt = strings.ReplaceAll(prompt, `{{question}}`, question)
+	prompt = strings.ReplaceAll(prompt, `{{answer}}`, answer)
+
+	messages := []adaptor.ZhimaChatCompletionMessage{{Role: `user`, Content: prompt}}
+
+	chatResp, _, err := common.RequestChat(
+		common.GetLang(c),
+		userId,
+		``,
+		msql.Params{},
+		``,
+		modelConfigId,
+		useModel,
+		messages,
+		nil,
+		0.1,
+		1024,
+	)
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+	chatResp.Result = strings.TrimPrefix(chatResp.Result, "```json")
+	chatResp.Result = strings.TrimSuffix(chatResp.Result, "```")
+	var result []string
+	err = json.Unmarshal([]byte(chatResp.Result), &result)
+	if err != nil {
+		logs.Error(err.Error())
+		c.String(http.StatusOK, lib_web.FmtJson(nil, errors.New(i18n.Show(common.GetLang(c), `sys_err`))))
+		return
+	}
+
+	c.String(http.StatusOK, lib_web.FmtJson(result, nil))
+}
+
+func GenerateAiPrompt(c *gin.Context) {
+	var adminUserId int
+	if adminUserId = GetAdminUserId(c); adminUserId == 0 {
+		return
+	}
+	aiChunkModel := strings.TrimSpace(c.PostForm(`ai_prompt_model`))
+	aiChunkModelConfigId := cast.ToInt(c.PostForm(`ai_prompt_model_config_id`))
+	aiPromptQuestion := strings.TrimSpace(c.PostForm(`ai_prompt_question`))
+	// check conf
+	if !common.CheckModelIsValid(adminUserId, aiChunkModelConfigId, aiChunkModel, common.Llm) {
+		common.FmtError(c, `param_invalid`, `ai_prompt_model`)
+		return
+	}
+	if len(aiPromptQuestion) == 0 {
+		common.FmtError(c, `question_empty`)
+		return
+	}
+	maxTokens := 0
+	//Generate AI prompt
+	prompt := fmt.Sprintf(define.PromptAiGenerate, 500)
+	messages := []adaptor.ZhimaChatCompletionMessage{
+		{
+			Role:    "system",
+			Content: prompt,
+		},
+		{
+			Role:    "user",
+			Content: aiPromptQuestion,
+		},
+	}
+	chatResp, _, err := common.RequestChat(
+		common.GetLang(c),
+		adminUserId,
+		"",
+		msql.Params{},
+		"",
+		cast.ToInt(aiChunkModelConfigId),
+		aiChunkModel,
+		messages,
+		nil,
+		0.1,
+		maxTokens,
+	)
+	if err != nil && len(chatResp.Result) <= 0 {
+		logs.Error(err.Error())
+		common.FmtError(c, `sys_err`, err.Error())
+		return
+	}
+	common.FmtOk(c, chatResp.Result)
+}
