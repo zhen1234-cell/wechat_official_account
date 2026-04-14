@@ -1,0 +1,13 @@
+{
+  "title_query_conditions": "查询条件",
+  "opt_select_query_condition": "选择查询条件",
+  "opt_input_variable": "输入变量",
+  "ph_input_content": "请输入内容，键入\"/\"可以插入变量",
+  "content_example": "内容示例：",
+  "title_query_fields": "查询字段",
+  "opt_select_query_fields": "选择查询字段",
+  "title_sort": "排序",
+  "opt_select_sort": "选择排序",
+  "label_query_count": "查询数量"
+}
+

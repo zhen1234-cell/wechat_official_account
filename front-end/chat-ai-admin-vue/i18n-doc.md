@@ -1,0 +1,654 @@
+# 国际化（i18n）模块详细说明
+
+## 1. 整体架构
+
+### 1.1 技术栈
+
+- **核心库**: vue-i18n 9.12.1
+- **状态管理**: Pinia (locale store)
+- **UI 组件库集成**: Ant Design Vue locale
+- **持久化**: localStorage (via pinia-plugin-persistedstate)
+
+### 1.2 核心文件结构
+
+```
+src/
+├── locales/
+│   ├── index.js                    # i18n 初始化入口
+│   ├── helper.js                   # 工具函数（消息生成、HTML lang 设置）
+│   └── lang/                       # 语言资源目录
+│       ├── zh-CN.js                # 中文入口文件
+│       ├── en-US.js                # 英文入口文件
+│       ├── zh-CN/                  # 中文资源
+│       │   ├── common.json
+│       │   ├── layout.json
+│       │   ├── routes/
+│       │   └── views/
+│       └── en-US/                  # 英文资源
+│           ├── common.json
+│           ├── layout.json
+│           ├── routes/
+│           └── views/
+├── hooks/web/
+│   ├── useI18n.js                  # 翻译 hook
+│   └── useLocale.js                # 语言切换 hook
+└── stores/modules/
+    └── locale.js                   # 语言状态管理
+```
+
+### 1.3 架构图
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Vue Components                       │
+│  (使用 useI18n('namespace') 获取翻译函数)                 │
+└──────────────────┬──────────────────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────────────────┐
+│                    useI18n Hook                          │
+│  - 处理 namespace 前缀                                   │
+│  - 调用 vue-i18n 的 t() 方法                             │
+└──────────────────┬──────────────────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────────────────┐
+│                   vue-i18n 实例                          │
+│  - i18n.global.t(key)                                    │
+│  - 管理语言包                                             │
+└──────────────────┬──────────────────────────────────────┘
+                   │
+         ┌─────────┴─────────┐
+         ▼                   ▼
+┌─────────────────┐  ┌─────────────────┐
+│  zh-CN.js       │  │  en-US.js       │
+│  (动态加载)     │  │  (动态加载)     │
+└─────────────────┘  └─────────────────┘
+         │                   │
+         └─────────┬─────────┘
+                   │
+         ┌─────────┴─────────┐
+         ▼                   ▼
+┌─────────────────┐  ┌─────────────────┐
+│  zh-CN/*.json   │  │  en-US/*.json   │
+│  (通过 genMessage│  │  (通过 genMessage│
+│   合并)         │  │   合并)         │
+└─────────────────┘  └─────────────────┘
+
+语言切换流程：
+LocaleDropdown.vue
+    │
+    ▼
+useLocale.changeLocale()
+    │
+    ├─→ 动态 import 目标语言包
+    ├─→ i18n.setLocaleMessage()
+    ├─→ i18n.global.locale = locale
+    ├─→ localeStore.setCurrentLocale()
+    ├─→ setHtmlPageLang()
+    └─→ window.location.reload()
+```
+
+## 2. 核心文件详细说明
+
+### 2.1 src/locales/index.js - i18n 初始化
+
+**职责**: 创建和配置 vue-i18n 实例
+
+**核心配置**:
+
+- `legacy: false` - 使用 Composition API 模式
+- `locale` - 当前语言（从 localeStore 读取）
+- `fallbackLocale` - 回退语言
+- `messages` - 语言包对象
+- `availableLocales` - 可用语言列表
+- `silentTranslationWarn` - 生产环境静默警告
+- `missingWarn` - 开发环境显示缺失警告
+
+**初始化流程**:
+
+1. 从 localeStore 获取当前语言
+2. 动态导入对应的语言入口文件 (zh-CN.js 或 en-US.js)
+3. 设置 HTML lang 属性
+4. 创建 i18n 实例并挂载到 app
+
+### 2.2 src/locales/helper.js - 工具函数
+
+#### setHtmlPageLang(locale)
+
+- 设置 HTML 文档的 lang 属性
+- 用于 SEO 和浏览器语言检测
+
+#### genMessage(langs, prefix)
+
+- **功能**: 将所有 JSON 语言文件合并成统一的消息对象
+- **输入**:
+  - `langs` - import.meta.glob 返回的模块对象
+  - `prefix` - 语言前缀 ('zh-CN' 或 'en-US')
+- **输出**: 嵌套对象，按照文件路径组织
+- **转换规则**:
+  - `./zh-CN/common.json` → `{ common: {...} }`
+  - `./zh-CN/views/user/login.json` → `{ views: { user: { login: {...} } } }`
+- **使用 lodash.set**: 自动创建嵌套结构
+
+### 2.3 src/hooks/web/useI18n.js - 翻译 Hook
+
+**职责**: 提供带有 namespace 的翻译函数
+
+**参数**:
+
+- `namespace` - 命名空间前缀（如 'views.user.login'）
+
+**返回**:
+
+- `t` - 翻译函数，自动添加 namespace 前缀
+- 其他 vue-i18n 方法（te, rt 等）
+
+**逻辑**:
+
+```javascript
+// 如果没有 namespace
+t('key') → 'key'
+
+// 如果有 namespace
+useI18n('views.user.login')
+t('accountLogin') → t('views.user.login.accountLogin')
+
+// 如果 key 本身包含 namespace
+t('common.add') → t('common.add')  // 不重复添加
+```
+
+**使用示例**:
+
+```vue
+<script setup>
+import { useI18n } from '@/hooks/web/useI18n'
+const { t } = useI18n('views.user.login')
+// 使用: {{ t('accountLogin') }}
+</script>
+```
+
+### 2.4 src/hooks/web/useLocale.js - 语言切换 Hook
+
+**职责**: 提供语言切换功能
+
+**核心方法**:
+
+- `changeLocale(locale)` - 切换语言
+
+**切换流程**:
+
+1. 动态 import 目标语言包: `import(`../../locales/lang/${locale}.js`)`
+2. 调用 `i18n.global.setLocaleMessage(locale, langModule.default)`
+3. 更新 i18n 的当前语言（兼容 legacy 和 composition 模式）
+4. 更新 localeStore 状态
+5. 设置 HTML lang 属性
+
+### 2.5 src/stores/modules/locale.js - 语言状态管理
+
+**职责**: 管理语言状态和 Ant Design Vue locale
+
+**State**:
+
+```javascript
+{
+  currentLocale: {
+    lang: 'zh-CN',              // 当前语言代码
+    antvLocale: zhCn            // Ant Design Vue 语言包
+  },
+  localeMap: [                  // 支持的语言列表
+    { lang: 'zh-CN', name: '简体中文' },
+    { lang: 'en-US', name: 'English' }
+  ]
+}
+```
+
+**Getters**:
+
+- `getCurrentLocale()` - 获取当前语言配置
+- `getLocaleMap()` - 获取所有支持的语言
+- `getSelectedLocale()` - 获取当前语言对象（从 localeMap 中查找）
+
+**Actions**:
+
+- `setCurrentLocale(localeMap)` - 设置当前语言
+  - 更新 lang
+  - 更新 antvLocale（根据 antvLocaleMap 映射）
+  - 持久化到 localStorage
+
+**Ant Design Vue 集成**:
+
+```javascript
+const antvLocaleMap = {
+  'zh-CN': zhCn, // ant-design-vue/es/locale/zh_CN
+  'en-US': en, // ant-design-vue/es/locale/en_US
+  en: en // 兼容旧版本
+}
+```
+
+## 3. 语言资源组织
+
+### 3.1 支持的语言
+
+- **zh-CN** (简体中文)
+- **en-US** (美式英语)
+
+### 3.2 语言文件结构
+
+#### 入口文件 (zh-CN.js / en-US.js)
+
+```javascript
+import { genMessage } from '../helper'
+const modulesFiles = import.meta.glob('./zh-CN/**/*.json', { eager: true })
+export default {
+  ...genMessage(modulesFiles, 'zh-CN')
+}
+```
+
+#### 资源目录结构
+
+```
+lang/
+├── zh-CN/
+│   ├── common.json              # 通用翻译（错误消息、操作按钮等）
+│   ├── layout.json              # 布局组件翻译
+│   ├── routes/
+│   │   └── basic.json           # 路由相关翻译
+│   └── views/
+│       └── user/
+│           ├── login.json       # 登录页翻译
+│           ├── model.json       # 模型管理翻译
+│           ├── left-menus.json  # 左侧菜单翻译
+│           ├── enterprise.json  # 企业设置翻译
+│           └── ...
+└── en-US/
+    └── (相同结构)
+```
+
+### 3.3 翻译 Key 命名规范
+
+**规则**:
+
+- 使用点号分隔的层级结构
+- 对应文件路径：`views/user/login.json` 中的 key 访问路径为 `views.user.login.key`
+- 使用小写字母和下划线
+- 语义化命名
+
+**示例**:
+
+```json
+// common.json
+{
+  "add": "添加",
+  "delete_successful": "删除成功",
+  "api_request_failed": "请求出错，请稍候重试"
+}
+
+// layout.json
+{
+  "header": {
+    "tooltip_error_log": "错误日志",
+    "dropdown_item_login_out": "退出系统"
+  }
+}
+
+// views/user/login.json
+{
+  "account_login": "账号登录",
+  "please_number": "请输入账号",
+  "profession_one_title": "金融行业"
+}
+```
+
+### 3.4 翻译内容格式
+
+**类型**:
+
+- 简单字符串: `"add": "添加"`
+- 嵌套对象: `"header": { "tooltip": "..." }`
+- 占位符支持（vue-i18n 标准语法）
+
+## 4. 语言切换完整流程
+
+### 4.1 初始化流程（应用启动）
+
+```
+main.js
+  │
+  ▼
+setupI18n(app)
+  │
+  ├─→ createI18nOptions()
+  │   │
+  │   ├─→ localeStore.getCurrentLocale (从 localStorage 读取)
+  │   ├─→ import(`./lang/${locale.lang}.js`)
+  │   ├─→ setHtmlPageLang(locale.lang)
+  │   └─→ return i18n options
+  │
+  ├─→ i18n = createI18n(options)
+  └─→ app.use(i18n)
+```
+
+### 4.2 切换语言流程
+
+```
+用户点击语言切换
+  │
+  ▼
+LocaleDropdown.vue.setLang()
+  │
+  ▼
+useLocale().changeLocale(key)
+  │
+  ├─→ import(`../../locales/lang/${locale}.js`)  // 动态加载
+  ├─→ i18n.global.setLocaleMessage(locale, messages)
+  ├─→ setI18nLanguage(locale)
+  │   │
+  │   ├─→ i18n.global.locale = locale  (兼容 legacy 模式)
+  │   ├─→ localeStore.setCurrentLocale({ lang })
+  │   └─→ setHtmlPageLang(locale)
+  │
+  └─→ window.location.reload()  // 刷新页面
+```
+
+### 4.3 页面刷新后
+
+1. localeStore 从 localStorage 恢复语言设置
+2. setupI18n 重新初始化，加载对应语言包
+3. 所有组件使用新的语言资源
+
+## 5. 与其他模块的集成
+
+### 5.1 Ant Design Vue 集成
+
+- **位置**: `src/components/global-config-provider/index.vue`
+- **方式**: 通过 ConfigProvider 的 locale 属性
+- **数据源**: localeStore.currentLocale.antvLocale
+
+```vue
+<ConfigProvider :locale="currentLocale.antvLocale">
+  <slot />
+</ConfigProvider>
+```
+
+### 5.2 Pinia 状态管理集成
+
+- **持久化**: 使用 `pinia-plugin-persistedstate`
+- **存储 key**: `lang`
+- **存储位置**: localStorage
+
+### 5.3 Vue Router 集成
+
+- **路由标题**: 可以使用 i18n 翻译
+- **面包屑**: layout.json 中定义了相关翻译
+
+### 5.4 组件使用方式
+
+**方式 1: 带命名空间（推荐）**
+
+```vue
+<script setup>
+import { useI18n } from '@/hooks/web/useI18n'
+const { t } = useI18n('views.user.login')
+</script>
+
+<template>
+  <div>{{ t('accountLogin') }}</div>
+  <!-- 自动添加前缀 -->
+</template>
+```
+
+**方式 2: 不带命名空间**
+
+```vue
+<script setup>
+import { useI18n } from '@/hooks/web/useI18n'
+const { t } = useI18n()
+</script>
+
+<template>
+  <div>{{ t('views.user.login.accountLogin') }}</div>
+  <!-- 完整路径 -->
+</template>
+```
+
+**方式 3: 使用别名引入多个命名空间**
+
+当组件已经使用了一个命名空间，但还需要访问其他命名空间（如 `common`）时，可以使用别名：
+
+```vue
+<script setup>
+import { useI18n } from '@/hooks/web/useI18n'
+
+// 主要命名空间
+const { t } = useI18n('views.user.login')
+// common 命名空间（使用别名避免冲突）
+const { t: tCommon } = useI18n('common')
+</script>
+
+<template>
+  <div>
+    <!-- 使用主要命名空间 -->
+    <button>{{ t('btnSubmit') }}</button>
+    <!-- 使用 common 命名空间 -->
+    <span>{{ tCommon('recommendation') }}</span>
+  </div>
+</template>
+```
+
+**适用场景**：
+- 组件内部已经定义了 `useI18n('specific-namespace')`
+- 需要访问 `common.json` 中的通用翻译（如 "推荐"、"添加"、"删除"等）
+- 避免创建重复的翻译键，优先复用 common 命名空间的翻译
+
+**优势**：
+- 避免命名冲突（使用 `tCommon` 而非 `t`）
+- 语义清晰，一眼就能看出翻译来源
+- 符合 DRY 原则，减少重复定义
+
+## 6. 配置项说明
+
+### 6.1 i18n 配置
+
+- **legacy: false** - 启用 Composition API
+- **fallbackLocale** - 回退语言（默认当前语言）
+- **sync: true** - 同步语言到根组件
+- **silentTranslationWarn** - 生产环境静默翻译警告
+- **missingWarn** - 开发环境显示缺失翻译警告
+- **silentFallbackWarn** - 生产环境静默回退警告
+
+### 6.2 Ant Design Vue 配置
+
+- 通过 localeStore 自动映射
+- 支持的语言：zh-CN, en-US
+- 兼容旧版本 'en'
+
+## 7. 注意事项和最佳实践
+
+### 7.1 添加新翻译
+
+1. 在对应语言的 JSON 文件中添加 key-value
+2. 确保中英文文件保持同步
+3. 使用语义化的 key 命名
+4. 避免硬编码文本
+
+### 7.2 添加新语言
+
+1. 在 `src/locales/lang/` 下创建新语言目录
+2. 创建对应的 JSON 文件
+3. 创建语言入口文件 (如 `fr-FR.js`)
+4. 在 `locale.js` 中更新 `localeMap` 和 `antvLocaleMap`
+
+### 7.3 性能优化
+
+- 使用动态导入语言包，减少初始加载体积
+- 按需加载，只加载当前需要的语言
+- JSON 文件格式，解析速度快
+
+### 7.4 开发建议
+
+- 在开发环境启用警告，方便发现缺失翻译
+- 使用统一的命名规范
+- 保持文件结构清晰，按功能模块组织
+- 定期检查翻译完整性
+
+## 8. 常见问题
+
+### Q1: 为什么语言切换后需要刷新页面？
+
+A: 为了确保所有组件和第三方库（如 Ant Design Vue）都能正确应用新语言。
+
+### Q2: 如何在组件外使用翻译？
+
+A: 可以直接导入 i18n 实例：
+
+```javascript
+import { i18n } from '@/locales'
+const t = i18n.global.t
+```
+
+### Q3: 如何支持占位符？
+
+A: 使用 vue-i18n 的标准语法：
+
+```json
+{
+  "welcome": "欢迎, {name}!"
+}
+```
+
+```javascript
+t('welcome', { name: 'John' })
+```
+
+### Q4: 如何处理复数形式？
+
+A: 使用 vue-i18n 的复数语法：
+
+```json
+{
+  "item": "0 项 | 1 项 | {n} 项"
+}
+```
+
+## 9. 相关文件清单
+
+### 核心文件
+
+- `src/locales/index.js` - i18n 初始化
+- `src/locales/helper.js` - 工具函数
+- `src/hooks/web/useI18n.js` - 翻译 hook
+- `src/hooks/web/useLocale.js` - 语言切换 hook
+- `src/stores/modules/locale.js` - 状态管理
+
+### 语言资源
+
+- `src/locales/lang/zh-CN.js` - 中文入口
+- `src/locales/lang/en-US.js` - 英文入口
+- `src/locales/lang/zh-CN/common.json` - 通用中文翻译
+- `src/locales/lang/en-US/common.json` - 通用英文翻译
+- `src/locales/lang/zh-CN/layout.json` - 布局中文翻译
+- `src/locales/lang/en-US/layout.json` - 布局英文翻译
+- `src/locales/lang/zh-CN/views/**` - 各页面中文翻译
+- `src/locales/lang/en-US/views/**` - 各页面英文翻译
+
+### 集成点
+
+- `src/layouts/AdminLayout/compoents/locale-dropdown.vue` - 语言切换组件
+- `src/components/global-config-provider/index.vue` - Ant Design Vue 集成
+- `src/main.js` - 应用入口，初始化 i18n
+
+## i18n Agent
+
+```markdown
+# Role
+你是一个精通 Vue3 国际化架构的前端专家（专注于 Vue3 + TypeScript + Composition API）。同时，你也是一位专业的 UI/UX 翻译专家，擅长将中文界面语言翻译为地道、简洁的英文。
+
+# Context
+我的项目 i18n 目录结构严格遵循**源码目录镜像映射**规则：
+- 源码目录：`src/views/...`
+- i18n 目录：`src/locales/lang/{lang}/views/...`
+- **映射规则**：每一个 Vue 组件文件对应一个同名的 JSON 翻译文件（文件名转换为 kebab-case）。
+
+# Goal
+分析**当前打开的代码文件**（Active File），提取其中的硬编码中文，将其抽取到对应的 i18n 模块 JSON 文件中，并自动重构代码。
+
+# Task Workflow
+
+1.  **Analyze Path & Namespace (分析路径与命名空间)**:
+    - **Step 1: 获取路径**
+      - 识别当前活动文件路径，例如：`src/views/public-library/home/index.vue`
+    - **Step 2: 推导 Namespace (核心)**
+      - 规则：移除 `src/` 前缀和文件后缀；将路径分隔符 `/` 替换为 `.`；确保所有片段均为 kebab-case。
+      - *推导结果*: `views.public-library.home.index`
+    - **Step 3: 定位 JSON 文件**
+      - 规则：`src/locales/lang/{lang}/` + [Namespace转换回路径] + `.json`
+      - *推导结果*: `src/locales/lang/{lang}/views/public-library/home/index.json`
+
+2.  **Extract & Translate (提取与翻译)**:
+    - 遍历文件提取硬编码中文。
+    - **查重策略 (Deduplication - 关键)**:
+      - 在生成新 Key 前，**必须**检查当前提取列表中（或现有 JSON 中）是否已存在相同的中文文本。
+      - **规则**: 如果中文内容完全一致，**强制复用**已有的 Key，严禁创建重复项（例如：禁止同时存在 `label_recycle` 和 `title_recycle` 对应同一个中文）。
+    - **生成 Key (语义化前缀规则)**:
+      - 仅在无重复 Key 时生成新 Key
+      - 按钮/操作：`btn_{verb}` (如: 提交 -> `btn_submit`, 取消 -> `btn_cancel`)
+      - 标签/表头：`label_{name}` (如: 用户名 -> `label_username`)
+      - 标题：`title_{name}` (如: 新增用户 -> `title_create_user`)
+      - 提示/消息：`msg_{content}` (如: 操作成功 -> `msg_operation_success`)
+      - 占位符：`ph_{content}` (如: 请输入 -> `ph_input`)
+    - **翻译原则 (Translation Guidelines)**:
+      - **简洁性**：英文翻译应简练有力，避免冗长的解释性翻译 (e.g., "Please click here to submit" -> "Submit").
+      - **格式规范**：
+        - **按钮/标题**：使用 **Title Case** (e.g., "Upload File").
+        - **提示信息**：使用 **Sentence case** (e.g., "File uploaded successfully.").
+      - **专业术语**：使用标准 SaaS/Web 术语 (e.g., "编辑" -> "Edit", "删除" -> "Delete", "保存" -> "Save").
+    - **写入 JSON**:
+      - 自动创建不存在的目录或文件。
+      - 向 `zh-CN` 写入中文，向 `en-US` 写入对应的英文翻译。
+
+3.  **Code Refactor (代码重构)**:
+    - **Import**: 
+      - 必须引入: `import { useI18n } from '@/hooks/web/useI18n'`
+    - **Setup**: 
+      - 使用推导出的 Namespace 初始化: `const { t } = useI18n('views.public-library.home.index')`
+    - **常规处理**: 
+      - 使用 `t('key')` 替换硬编码字符串。
+
+    - **关键修正 - `defineProps` 处理**:
+      - **禁止**: 在 `defineProps` 内部使用 `t()` (会导致 hoisting error)。
+      - **规则**: 
+        1. 提取中文到 JSON。
+        2. 将 `defineProps` 的 `default` 值修改为**Key 字符串** (例如 `default: 'btn_text'`)。
+        3. 检查 Template 中使用该 Prop 的地方，改为 `{{ t(propName) }}`。
+      - *注意*: 如果 Template 中不便修改，请使用 `computed` 包装 Prop 进行翻译。
+
+    - **参数处理**:
+      - 原文 `"搜索 {val}"` -> 代码 `t('search', { val })`。
+
+# Constraints
+1.  **强制**：所有 i18n 引入必须来自 `@/hooks/web/useI18n`。
+2.  **强制**：Namespace 必须包含**完整的文件名路径**。
+3.  **强制**：若遇到 `defineProps` 默认值，**切勿**直接包裹 `t()`，必须传递 Key 字符串。
+4.  **强制**：翻译英文时，优先考虑 UI 语境，**禁止**直译（如 "登录中" -> "Logging in...", not "Login center"）。
+5.  **强制**：同一中文字符串必须**合并**为一个 Key，禁止出现重复 Key。
+6.  **强制**：如果当前是 React (.tsx) 文件，请停止操作并提示“仅支持 Vue 文件”。
+7.  **强制**：始终用中文沟通。
+8.  **输出**：直接生成修改后的代码块和 JSON 文件内容，无需啰嗦解释。
+
+# Final Output format
+执行完成后，请生成简要报告，格式如下：
+
+翻译完成结果如下：
+
+### 翻译内容:
+| 生成的Key | 原文 | 译文 |
+|----------|------|------|
+
+### 命名空间：`{Namespace}`
+
+### 国际化文件：
+- `src/locales/lang/{lang}/` + [Namespace转换回路径] + `.json`
+- `src/locales/lang/{lang}/` + [Namespace转换回路径] + `.json`
+```
+

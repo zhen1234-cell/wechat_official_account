@@ -1,0 +1,9 @@
+{
+  "label_record_id": "record_id",
+  "ph_input_content": "Please enter content, type \"/\" to insert variable",
+  "desc_update_record_id": "Record ID to be updated; Example value: \"reCWNXZPQv\"",
+  "label_update_data": "Update Data",
+  "opt_select_update_data": "Select Update Data",
+  "opt_input_variable": "Input Variable",
+  "desc_update_data_example": "Content example: "
+}

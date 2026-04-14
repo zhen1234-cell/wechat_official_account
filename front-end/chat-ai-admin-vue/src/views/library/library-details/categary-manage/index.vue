@@ -1,0 +1,319 @@
+<template>
+  <div class="robot-page">
+    <div class="search-content-block">
+      <div class="selct-star-box">
+        <SelectStarBox v-if="libraryType == 0" :hideId="[0]" :startLists="startLists" @change="handleCategoryChange" />
+      </div>
+      <a-space>
+        <a-select
+          v-model:value="filterData.status"
+          :placeholder="t('ph_select')"
+          style="width: 160px"
+          @change="search"
+        >
+          <a-select-option :value="-1">{{ t('option_all_status') }}</a-select-option>
+          <a-select-option v-for="(i, key) in listStatusMap" :value="key">{{ i }}</a-select-option>
+        </a-select>
+        <a-button @click="reEmbeddingVectors">{{ t('btn_re_embedding') }}</a-button>
+
+        <!-- <a-button @click="openEditSubscription({})" type="primary">
+          <template #icon>
+            <PlusOutlined />
+          </template>
+          <span>添加分段</span>
+        </a-button> -->
+      </a-space>
+    </div>
+    <div class="scroll-box">
+      <cu-scroll :scrollbar="{ minSize: 0 }" @onScrollEnd="onScrollEnd">
+        <div class="content-block">
+          <SubsectionBox
+            ref="subsectionBoxRef"
+            :isQaLibray="detailsInfo.is_qa_doc"
+            :total="total"
+            :paragraphLists="paragraphLists"
+            @openEditSubscription="openEditSubscription"
+            @handleDelParagraph="handleDelParagraph"
+            @handleConvert="handleConvert"
+            @getStatrList="getStatrList"
+          ></SubsectionBox>
+        </div>
+      </cu-scroll>
+    </div>
+    <EditSubscription
+      :detailsInfo="detailsInfo"
+      @handleEdit="handleEditParagraph"
+      @handleStatrList="getStatrList"
+      ref="editSubscriptionRef"
+    ></EditSubscription>
+  </div>
+</template>
+
+<script setup>
+import { reactive, ref, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
+import { message } from 'ant-design-vue'
+import { useI18n } from '@/hooks/web/useI18n'
+import SelectStarBox from '@/views/library/library-preview/components/selct-star-box.vue'
+import {
+  getLibFileInfo,
+  reconstructGraph,
+  reconstructCategoryVector,
+  getCategoryParagraphList
+} from '@/api/library'
+import { PlusOutlined, DownOutlined, StarFilled } from '@ant-design/icons-vue'
+import SubsectionBox from './components/subsection-box.vue'
+import EditSubscription from '@/views/library/library-preview/components/edit-subsection.vue'
+import { useLibraryStore } from '@/stores/modules/library'
+
+const { t } = useI18n('views.library.library-details.categary-manage.index')
+const libraryStore = useLibraryStore()
+
+
+const libraryType = libraryStore.type
+
+const route = useRoute()
+const query = route.query
+
+const startLists = ref([])
+const paragraphLists = ref([])
+
+const total = ref(0)
+const graphStatusMap = {
+  0: t('status_graph_pending'),
+  4: t('status_graph_generating'),
+  2: t('status_graph_success'),
+  3: t('status_graph_failed')
+}
+
+const listStatusMap = {
+  0: t('status_convert_unconverted'),
+  1: t('status_convert_converted'),
+  2: t('status_convert_error'),
+  3: t('status_convert_converting')
+}
+const detailsInfo = ref({})
+
+const getStatrList = (data) => {
+  startLists.value = data
+}
+
+const paginations = ref({
+  page: 1,
+  size: 30
+})
+
+const filterData = reactive({
+  status: -1,
+  category_id: -1,
+  library_id: query.id
+})
+
+const search = () => {
+  paginations.value.page = 1
+  total.value = 0
+  paragraphLists.value = []
+  getParagraphLists()
+}
+const handleCategoryChange = (id) => {
+  filterData.category_id = id
+  search()
+}
+const reEmbeddingVectors = () => {
+  reconstructCategoryVector({ id: query.id }).then(() => message.success(t('msg_operation_complete')))
+}
+
+const editSubscriptionRef = ref(null)
+const openEditSubscription = (data) => {
+  editSubscriptionRef.value.showModal(JSON.parse(JSON.stringify(data)))
+}
+
+// 处理刷新数据 - QA合并后重新加载数据
+const handleRefreshData = () => {
+  // 重新获取段落列表
+  getParagraphLists()
+}
+
+// 监听跨窗口消息，处理QA合并后的刷新
+const handleMessage = (event) => {
+  if (event.data?.type === 'qa-merged' && event.data?.libraryId == detailsInfo.value.library_id) {
+    handleRefreshData()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('message', handleMessage)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('message', handleMessage)
+})
+
+const handleEditParagraph = (data) => {
+  if (!data.id) {
+    paginations.value.page = 1
+    getParagraphLists()
+    return
+  }
+  // 更新分段内容 无刷更新
+  let lists = paragraphLists.value
+  let index = lists.findIndex((item) => item.id == data.id)
+  if (index > -1) {
+    let lastItem = lists[index]
+    lastItem.title = data.title
+    lastItem.content = data.content
+    lastItem.question = data.question
+    lastItem.answer = data.answer
+    lastItem.answer = data.answer
+    lastItem.images = data.images
+    lastItem.category_id = data.category_id
+    lastItem.word_total = data.question.length + data.answer.length + data.content.length
+    lastItem.similar_questions = JSON.parse(data.similar_questions)
+    lists.splice(index, 1, lastItem)
+    paragraphLists.value = lists
+  }
+}
+
+const handleDelParagraph = (id) => {
+  // 无刷新 删除列表
+  let lists = paragraphLists.value
+  let index = lists.findIndex((item) => item.id == id)
+  if (index > -1) {
+    lists.splice(index, 1)
+    paragraphLists.value = lists
+    total.value = --total.value
+    console.log(total.value ,'===')
+  }
+}
+
+const onScrollEnd = () => {
+  if (isLoading.value) {
+    return
+  }
+  if (paragraphLists.value.length >= total.value) {
+    return
+  }
+  loadMore()
+}
+
+const loadMore = () => {
+  paginations.value.page++
+  getParagraphLists()
+}
+const handleConvert = () => {
+  updataList()
+}
+
+function setIntervalUpStatus() {
+  clearInterval(timer)
+  // if()
+  let list = paragraphLists.value.filter((item) => item.status == 3)
+  if (list.length) {
+    timer = setInterval(() => {
+      updataList()
+    }, 5000)
+  } else {
+    clearInterval(timer)
+  }
+}
+
+const updataList = () => {
+  getCategoryParagraphList({
+    page: 1,
+    size: paragraphLists.value.length,
+    ...filterData
+  }).then((res) => {
+    let data = res.data
+    let list = data.list || []
+    list.forEach((item) => {
+      item.status_text = listStatusMap[item.status]
+      item.graph_status_text = graphStatusMap[item.graph_status]
+      if(item.similar_questions){
+        item.similar_questions = JSON.parse(item.similar_questions)
+      }
+    })
+    paragraphLists.value = list
+    setIntervalUpStatus()
+  })
+}
+
+let timer = null
+
+const isLoading = ref(false)
+
+const getParagraphLists = () => {
+  isLoading.value = true
+  getCategoryParagraphList({
+    ...paginations.value,
+    ...filterData
+  }).then((res) => {
+    isLoading.value = false
+    let data = res.data
+    let list = data.list || []
+    if (data.info) {
+      detailsInfo.value = {
+        ...data.info,
+        library_id: data.info.id,
+        is_qa_doc: data.info.type == 2 ? 1 : 0
+      }
+    }
+    list.forEach((item) => {
+      item.status_text = listStatusMap[item.status]
+      item.graph_status_text = graphStatusMap[item.graph_status]
+      if(item.similar_questions){
+        item.similar_questions = JSON.parse(item.similar_questions)
+      }
+    })
+
+    if (paginations.value.page == 1) {
+      paragraphLists.value = []
+    }
+    paragraphLists.value = [...paragraphLists.value, ...list]
+    total.value = data.total
+    setIntervalUpStatus()
+  })
+}
+
+getParagraphLists()
+</script>
+
+<style lang="less" scoped>
+.robot-page {
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.search-content-block {
+  display: flex;
+  align-items: center;
+  margin-bottom: 16px;
+  justify-content: space-between;
+}
+.scroll-box {
+  flex: 1;
+  overflow: hidden;
+}
+
+.list-box {
+  height: 999px;
+}
+
+.empty-box {
+  text-align: center;
+  height: 100%;
+  padding-top: 148px;
+  img {
+    width: 200px;
+    height: 200px;
+  }
+  .title {
+    font-size: 16px;
+    font-style: normal;
+    font-weight: 600;
+    line-height: 24px;
+    color: #262626;
+  }
+}
+</style>

@@ -1,0 +1,9 @@
+{
+  "label_record_id": "record_id",
+  "ph_input_content": "请输入内容，键入\"/\"可以插入变量",
+  "desc_update_record_id": "待更新的记录ID；示例值：\"reCWNXZPQv\"",
+  "label_update_data": "更新数据",
+  "opt_select_update_data": "选择更新数据",
+  "opt_input_variable": "输入变量",
+  "desc_update_data_example": "内容示例："
+}

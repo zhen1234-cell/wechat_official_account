@@ -1,0 +1,542 @@
+<template>
+  <NodeFormLayout>
+    <template #header>
+      <NodeFormHeader :title="node.node_name" :iconName="node.node_icon_name">
+        <template #desc>
+          <span>{{ t('desc_judge_condition') }}</span>
+        </template>
+      </NodeFormHeader>
+    </template>
+    <div class="judge-node-form">
+      <div class="form-block" @mousedown.stop="">
+        <a-form ref="formRef" layout="vertical" :model="formState">
+          <draggable
+            style="display: flex; flex-direction: column; gap: 8px"
+            handle=".drag-btn"
+            v-model="formState.term"
+            item-key="key"
+          >
+            <template #item="{ element: item, index }">
+              <div class="gray-block" :key="item.key">
+                <div class="gray-block-title">
+                  <a-flex :gap="8"
+                    ><HolderOutlined class="icon drag-btn" />{{ index == 0 ? t('label_if') : t('label_else_if') }}
+                  </a-flex>
+                  <div
+                    v-if="formState.term.length > 1"
+                    class="btn-hover-wrap"
+                    @click="handleDelBranch(index)"
+                  >
+                    <CloseCircleOutlined />
+                  </div>
+                </div>
+                <div class="condition-list-box">
+                  <div class="left-select-box">
+                    <a-select
+                      size="small"
+                      v-model:value="item.is_or"
+                      :bordered="false"
+                      style="width: 64px"
+                    >
+                      <a-select-option :value="0">{{ t('label_and') }}</a-select-option>
+                      <a-select-option :value="1">{{ t('label_or') }}</a-select-option>
+                    </a-select>
+                  </div>
+                  <div class="condition-body">
+                    <div class="condition-item" v-for="(term, i) in item.terms" :key="term.key">
+                      <!-- <a-select
+                      placeholder="请选择"
+                      v-model:value="term.variable"
+                      style="width: 100px"
+                      @change="handleVariableChange(term)"
+                    >
+                      <a-select-option v-for="option in variableOptions" :value="option.key">{{
+                        option.label || option.key
+                      }}</a-select-option>
+                    </a-select> -->
+                      <a-cascader
+                        v-model:value="term.variable"
+                        @change="handleVariableChange(term)"
+                        @dropdownVisibleChange="onDropdownVisibleChange"
+                        style="width: 160px"
+                        :options="variableOptions"
+                        :allowClear="false"
+                        :displayRender="({ labels }) => labels.join('/')"
+                        :field-names="{ children: 'children' }"
+                      :placeholder="t('ph_select')"
+                    />
+                      <a-select v-model:value="term.type" style="width: 120px" :placeholder="t('ph_select')">
+                        <a-select-option
+                          v-for="option in getTypeOptions(term)"
+                          :value="option.value"
+                          :key="option.value"
+                          >{{ option.label }}</a-select-option
+                        >
+                      </a-select>
+                      <a-input
+                        v-if="term.type != 5 && term.type != 6"
+                        :placeholder="t('ph_input')"
+                        v-model:value="term.value"
+                        style="width: 150px"
+                      ></a-input>
+                      <div class="btn-hover-wrap" @click="handleDelCondition(index, i)">
+                        <CloseCircleOutlined />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="btn-wrap">
+                  <a-button
+                    @click="handleAddCondition(index)"
+                    :icon="h(PlusOutlined)"
+                    block
+                    type="dashed"
+                    >{{ t('label_add_condition') }}</a-button
+                  >
+                </div>
+              </div>
+            </template>
+          </draggable>
+
+          <div class="add-btn-block">
+            <a-button @click="handleAddBranch" :icon="h(PlusOutlined)" block type="dashed"
+              >{{ t('label_add_branch') }}</a-button
+            >
+          </div>
+          <div class="gray-block mt8">
+            <div class="gray-block-title">{{ t('label_else') }}</div>
+            <div class="main-text">{{ t('msg_else_default_branch') }}</div>
+          </div>
+        </a-form>
+      </div>
+    </div>
+  </NodeFormLayout>
+</template>
+
+<script setup>
+import { ref, reactive, watch, h, inject, onMounted } from 'vue'
+import draggable from 'vuedraggable'
+import NodeFormLayout from './node-form-layout.vue'
+import NodeFormHeader from './node-form-header.vue'
+import { CloseCircleOutlined, PlusOutlined, HolderOutlined } from '@ant-design/icons-vue'
+import { specialNodeList } from '@/views/workflow/components/util.js'
+import { useI18n } from '@/hooks/web/useI18n'
+
+const { t } = useI18n('views.workflow.components.node-form-drawer.judge-node-form')
+
+const props = defineProps({
+  node: {
+    type: Object,
+    default: () => ({})
+  },
+  nodeId: {
+    type: String,
+    default: ''
+  },
+  lf: {
+    type: Object,
+    default: null
+  }
+})
+
+// const graphModel = inject('getGraph')
+const getNode = inject('getNode')
+const setData = inject('setData')
+
+const formRef = ref()
+
+const formState = reactive({
+  term: []
+})
+
+const variableOptions = ref([])
+
+function getOptions() {
+  let list = getNode().getAllParentVariable()
+  const nodeModel = props.lf.getNodeModelById(props.nodeId)
+  let loop_parent_key = nodeModel.properties.loop_parent_key
+  let result = handleOptions(list)
+  if (loop_parent_key) {
+    list = list.filter((item) => item.node_type != '25')
+    result = handleOptions(list)
+    const gropModel = props.lf.getNodeModelById(loop_parent_key)
+    if (gropModel) {
+      let dataRaw = gropModel.properties.dataRaw || gropModel.properties.node_params || '{}'
+      let loop = JSON.parse(dataRaw).loop || {}
+      const intermediateChildren = handleIntermediateOption(loop.intermediate_params, gropModel)
+      const existing = result.find((item) => (item.node_id || item.value) == gropModel.id)
+
+      // 修复重复数据问题，判断是否已存在该父分组
+      // - 已存在：把中间变量 intermediateChildren 合并进原节点的 children （并按 original_value/value/key 去重）
+      // - 不存在：才 push 新节点
+      if (existing) {
+        const merged = []
+        const seen = new Set();
+        [...(existing.children || []), ...intermediateChildren].forEach((child) => {
+          const key = child.original_value || child.value || child.key
+          if (!seen.has(key)) {
+            seen.add(key)
+            merged.push(child)
+          }
+        })
+        existing.children = merged
+      } else {
+        result.push({
+          label: gropModel.properties.node_name,
+          node_id: gropModel.id,
+          node_type: gropModel.properties.node_type,
+          typ: 'node',
+          value: gropModel.id,
+          children: intermediateChildren
+        })
+      }
+    }
+  }
+
+  variableOptions.value = result
+}
+
+// 递归处理Options
+function handleOptions(options) {
+  options.forEach((item) => {
+    if (item.typ == 'node') {
+      if (item.node_type == 1) {
+        item.value = 'global'
+      } else {
+        item.value = item.node_id
+      }
+    } else {
+      item.value = item.key
+    }
+
+    if (item.children && item.children.length > 0) {
+      item.children = handleOptions(item.children)
+    }
+  })
+
+  return options
+}
+
+function handleIntermediateOption(options, gropModel) {
+  let result = []
+
+  if (options && options.length) {
+    options.forEach((item) => {
+      if (item.key) {
+        result.push({
+          id: gropModel.id,
+          key: item.key,
+          value: item.key,
+          label: item.key,
+          node_id: gropModel.id,
+          node_name: gropModel.properties.node_name,
+          node_type: gropModel.properties.node_type,
+          original_value: gropModel.id + '.' + item.key,
+          text: item.key,
+          typ: item.typ
+        })
+      }
+    })
+  }
+
+  return result
+}
+
+const onDropdownVisibleChange = (visible) => {
+  if (!visible) {
+    getOptions()
+  }
+}
+
+const init = () => {
+  try {
+    let term = JSON.parse(props.node.node_params).term || []
+
+    term = term.map((item) => {
+      let terms = item.terms.map((it) => {
+        // 判断是不是特殊节点
+        let specialKey = ''
+
+        for (let i = 0; i < specialNodeList.length; i++) {
+          if (it.variable.indexOf(specialNodeList[i]) > -1) {
+            specialKey = specialNodeList[i]
+            break
+          }
+        }
+
+        if (specialKey != '') {
+          let arr = it.variable.split('.')
+          it.variable = [arr[0], specialKey]
+        } else {
+          it.variable = it.variable.split('.')
+        }
+        return {
+          ...it,
+          type: it.type > 0 ? it.type : 1,
+          key: Math.random() * 10000
+        }
+      })
+
+      return {
+        ...item,
+        is_or: item.is_or ? 1 : 0,
+        terms,
+        key: Math.random() * 10000
+      }
+    })
+
+    formState.term = term
+
+    update()
+  } catch (error) {
+    console.log(error)
+  }
+}
+
+const update = () => {
+  let term = JSON.parse(JSON.stringify(formState.term))
+
+  term = term.map((item) => {
+    return {
+      is_or: item.is_or == 1,
+      next_node_key: item.next_node_key,
+      terms: item.terms.map((it) => {
+        let variable = it.variable.join('.')
+        return {
+          variable: variable,
+          is_mult: it.is_mult,
+          type: it.type,
+          value: it.value
+        }
+      })
+    }
+  })
+
+  setData({
+    ...props.node,
+    term,
+    node_params: JSON.stringify({
+      term: term
+    })
+  })
+}
+
+const handleAddCondition = (index) => {
+  formState.term[index].terms.push({
+    is_mult: false,
+    type: void 0,
+    value: '',
+    variable: [],
+    key: Math.random() * 10000
+  })
+}
+
+const handleDelCondition = (index, i) => {
+  formState.term[index].terms.splice(i, 1)
+}
+
+const handleAddBranch = () => {
+  formState.term.push({
+    is_or: 0,
+    key: Math.random() * 10000,
+    next_node_key: '',
+    terms: [
+      {
+        is_mult: false,
+        type: void 0,
+        value: '',
+        variable: [],
+        key: Math.random() * 10000
+      }
+    ]
+  })
+}
+
+const handleDelBranch = (index) => {
+  formState.term.splice(index, 1)
+}
+
+const handleVariableChange = (term) => {
+  let typ = getTypeByVariable(term)
+  term.is_mult = typ.includes('array')
+  term.type = void 0
+}
+
+let baseTypeOptions = [
+  {
+    label: t('opt_equal'),
+    value: 1
+  },
+  {
+    label: t('opt_not_equal'),
+    value: 2
+  },
+  {
+    label: t('opt_contain'),
+    value: 3
+  },
+  {
+    label: t('opt_not_contain'),
+    value: 4
+  },
+  {
+    label: t('opt_is_empty'),
+    value: 5
+  },
+  {
+    label: t('opt_not_empty'),
+    value: 6
+  }
+]
+
+let baseTypeOptions2 = [
+  {
+    label: t('opt_contain_one'),
+    value: 3
+  },
+  {
+    label: t('opt_not_contain_one'),
+    value: 4
+  },
+  {
+    label: t('opt_is_empty'),
+    value: 5
+  },
+  {
+    label: t('opt_not_empty'),
+    value: 6
+  }
+]
+
+function getTypeByVariable(data) {
+  let typ = ''
+  if (data.variable && data.variable.length > 0) {
+    let slectItem = variableOptions.value.filter((item) => item.key == data.variable[0])
+    if (slectItem && slectItem.length) {
+      typ = slectItem[0].typ
+    }
+    if (typ == 'object') {
+      if (slectItem[0] && slectItem[0].children) {
+        slectItem = slectItem[0].subs.filter((item) => item.key == data.variable[1])
+      }
+      if (slectItem && slectItem.length) {
+        typ = slectItem[0].typ
+      }
+
+      if (typ == 'object') {
+        if (slectItem[0] && slectItem[0].children) {
+          slectItem = slectItem[0].subs.filter((item) => item.key == data.variable[2])
+        }
+        if (slectItem && slectItem.length) {
+          typ = slectItem[0].typ
+        }
+      }
+    }
+  }
+  return typ
+}
+
+function getTypeOptions(data) {
+  if (!data.variable) {
+    return []
+  }
+  let typ = getTypeByVariable(data)
+
+  if (typ == '') {
+    if (data.is_mult) {
+      return baseTypeOptions2
+    } else {
+      return baseTypeOptions
+    }
+  }
+
+  if (typ == 'boole') {
+    return [
+      {
+        label: t('opt_equal'),
+        value: 1
+      },
+      {
+        label: t('opt_not_equal'),
+        value: 2
+      }
+    ]
+  }
+
+  if (typ.includes('array')) {
+    return baseTypeOptions2
+  }
+
+  return baseTypeOptions
+}
+
+watch(
+  () => formState,
+  () => {
+    update()
+  },
+  { deep: true }
+)
+
+onMounted(() => {
+  getOptions()
+
+  init()
+})
+</script>
+
+<style lang="less" scoped>
+@import './form-block.less';
+
+.main-text {
+  color: #595959;
+}
+.btn-wrap {
+  margin-top: 8px;
+  padding-left: 65px;
+  padding-right: 28px;
+}
+.condition-list-box {
+  display: flex;
+  align-items: center;
+  .left-select-box {
+    width: 90px;
+    ::v-deep(.ant-select) {
+      border-radius: 6px;
+      transition: all 0.3s cubic-bezier(0.645, 0.045, 0.355, 1);
+      &:hover {
+        background: #e4e6eb;
+      }
+    }
+    ::v-deep(.ant-select-selector) {
+      color: #2475fc;
+    }
+    ::v-deep(.ant-select-arrow) {
+      color: #2475fc;
+    }
+  }
+  .condition-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    .condition-item {
+      display: flex;
+      gap: 4px;
+
+      .btn-hover-wrap {
+        width: 28px;
+      }
+    }
+  }
+}
+.gray-block {
+  margin-top: 8px;
+}
+.gray-block-title {
+  display: flex;
+  justify-content: space-between;
+}
+.add-btn-block {
+  margin-top: 8px;
+}
+</style>

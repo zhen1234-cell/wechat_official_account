@@ -1,0 +1,8 @@
+{
+  "label_insert_data": "Insert Data",
+  "tip_empty_field": "(Leave field value empty if not filled)",
+  "opt_select_add_data": "Select Add Data",
+  "opt_input_variable": "Input Variable",
+  "ph_input_content": "Please enter content, type \"/\" to insert variable",
+  "desc_data_example": "Content example: "
+}

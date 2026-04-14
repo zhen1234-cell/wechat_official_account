@@ -1,0 +1,344 @@
+<template>
+  <div>
+    <a-modal
+      v-model:open="open"
+      :title="t('title')"
+      wrapClassName="no-padding-modal"
+      :bodyStyle="{ 'max-height': '600px', 'overflow-y': 'auto' }"
+      :width="746"
+    >
+      <template #footer>
+        <a-button type="primary" :loading="confirmLoading" @click="handleOk">{{ t('use_prompt') }}</a-button>
+      </template>
+
+      <div class="ai-create-box">
+        <div class="input-box">
+          <ModelSelect
+            modelType="LLM"
+            v-model:modeName="formState.use_model"
+            v-model:modeId="formState.model_config_id"
+            style="width: 300px"
+            @loaded="onVectorModelLoaded"
+          />
+        </div>
+        <div class="input-box">
+          <a-textarea
+            style="width: 100%"
+            v-model:value="demand"
+            auto-size
+            size="large"
+            :placeholder="t('placeholder')"
+          ></a-textarea>
+          <div class="btn-box" :class="{ 'disabed-status': isLoading }" @click="handleCreatePrompt">
+            <LoadingOutlined v-if="isLoading" />
+            <svg-icon name="ai-mark" />
+            <span v-if="isLoading">{{ t('generating') }}</span>
+            <span v-else>{{ t('generate') }}</span>
+          </div>
+        </div>
+        <div class="quick-tags-box">
+          <div class="quick-label">{{ t('quick_generate') }}</div>
+          <div class="quick-tags-content">
+            <a-tag
+            v-for="item in quickData"
+            :key="item.title"
+            @click="handleQuickMark(item.title)"
+            color="blue"
+            >{{ item.title }}</a-tag
+          >
+          </div>
+        </div>
+        <div class="ai-list-box">
+          <template v-if="isLoading">
+            <div class="loading-box">
+              <a-spin :tip="t('generating_tip')"></a-spin>
+            </div>
+          </template>
+          <template v-else>
+            <div class="prompt-list-box" v-if="hasData">
+              <div class="prompt-list">
+                <div class="prompt-header">
+                  <div class="prompt-title">{{ formState.promptStruct.role.subject }}</div>
+                </div>
+                <div class="prompt-content">
+                  {{ formState.promptStruct.role.describe }}
+                </div>
+              </div>
+              <!-- 任务 -->
+              <div class="prompt-list">
+                <div class="prompt-header">
+                  <div class="prompt-title">{{ formState.promptStruct.task.subject }}</div>
+                </div>
+                <div class="prompt-content">
+                  {{ formState.promptStruct.task.describe }}
+                </div>
+              </div>
+              <!-- 要求 -->
+              <div class="prompt-list">
+                <div class="prompt-header">
+                  <div class="prompt-title">
+                    {{ formState.promptStruct.constraints.subject }}
+                  </div>
+                </div>
+                <div class="prompt-content">
+                  {{ formState.promptStruct.constraints.describe }}
+                </div>
+              </div>
+              <!-- 技能 -->
+              <div class="prompt-list">
+                <div class="prompt-header">
+                  <div class="prompt-title">
+                    {{ formState.promptStruct.skill.subject }}
+                  </div>
+                </div>
+                <div class="prompt-content">
+                  {{ formState.promptStruct.skill.describe }}
+                </div>
+              </div>
+              <!-- 输出格式 -->
+              <div class="prompt-list">
+                <div class="prompt-header">
+                  <div class="prompt-title">{{ formState.promptStruct.output.subject }}</div>
+                </div>
+                <div class="prompt-content">
+                  {{ formState.promptStruct.output.describe }}
+                </div>
+              </div>
+              <!-- 风格 -->
+              <div class="prompt-list">
+                <div class="prompt-header">
+                  <div class="prompt-title">{{ formState.promptStruct.tone.subject }}</div>
+                </div>
+                <div class="prompt-content">
+                  {{ formState.promptStruct.tone.describe }}
+                </div>
+              </div>
+
+              <!-- 自定义 -->
+              <div
+                class="prompt-list"
+                v-for="(item, index) in formState.promptStruct.custom"
+                :key="index + item.key ? item.key : ''"
+              >
+                <div class="prompt-header">
+                  <div class="prompt-title">{{ item.subject }}</div>
+                </div>
+                <div class="prompt-content">{{ item.describe }}</div>
+              </div>
+            </div>
+            <div class="empty-box" v-else>
+              <a-empty :image="simpleImage" :description="description" />
+            </div>
+          </template>
+        </div>
+      </div>
+    </a-modal>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, nextTick } from 'vue'
+import { createPromptByLlm } from '@/api/user/index.js'
+import { message } from 'ant-design-vue'
+import { LoadingOutlined } from '@ant-design/icons-vue'
+import { useRoute } from 'vue-router'
+import { Empty } from 'ant-design-vue'
+import { useI18n } from '@/hooks/web/useI18n'
+
+const { t } = useI18n('views.user.prompt-library.components.ai-create-prompt')
+const simpleImage = Empty.PRESENTED_IMAGE_SIMPLE
+const open = ref(false)
+const confirmLoading = ref(false)
+const query = useRoute().query
+const emit = defineEmits(['handleAiSave'])
+
+const demand = ref('')
+
+const isLoading = ref(false)
+
+const quickData = [
+  {
+    title: t('quick_tag_ecommerce')
+  },
+  {
+    title: t('quick_tag_education')
+  }
+]
+
+const description = ref(t('empty_description'))
+const show = () => {
+  hasData.value = false
+  formState.promptStruct = defaultData
+  demand.value = ''
+  description.value = t('empty_description')
+  open.value = true
+}
+const hasData = ref(false)
+const defaultData = {
+  role: {
+    subject: '',
+    describe: ''
+  },
+  task: {
+    subject: '',
+    describe: ''
+  },
+  constraints: {
+    subject: '',
+    describe: ''
+  },
+  skill: {
+    subject: '',
+    describe: ''
+  },
+  output: {
+    subject: '',
+    describe: ''
+  },
+  tone: {
+    subject: '',
+    describe: ''
+  },
+  custom: []
+}
+const formState = reactive({
+  promptStruct: defaultData,
+  use_model: '',
+  model_config_id: ''
+})
+const handleQuickMark = (title) => {
+  demand.value = title
+}
+const handleCreatePrompt = () => {
+  if (!demand.value) {
+    return message.error(t('input_prompt_error'))
+  }
+  if (isLoading.value) {
+    return message.error(t('generating_tip'))
+  }
+  isLoading.value = true
+  createPromptByLlm({
+    demand: demand.value,
+    use_model: formState.use_model,
+    model_config_id: formState.model_config_id
+  })
+    .then((res) => {
+      formState.promptStruct = JSON.parse(res.data.promptStruct)
+      hasData.value = true
+    })
+    .finally(() => {
+      isLoading.value = false
+    })
+    .catch((res) => {
+      hasData.value = false
+      description.value = res.msg
+    })
+}
+
+const onVectorModelLoaded = (list) => {
+  nextTick(() => {
+    formState.model_config_id = list[0]?.model_config_id
+    formState.use_model = list[0]?.children[0]?.name
+  })
+}
+const handleOk = () => {
+  if (!hasData.value) {
+    return message.error(t('generate_first_error'))
+  }
+  emit('handleAiSave', formState.promptStruct)
+  open.value = false
+}
+
+defineExpose({
+  show
+})
+</script>
+
+<style lang="less" scoped>
+.loading-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 120px;
+}
+.empty-box {
+  padding-top: 80px;
+  ::v-deep(.ant-empty-description) {
+    color: #262626;
+  }
+}
+.ai-create-box {
+  padding-right: 24px;
+  .input-box {
+    position: relative;
+    margin-top: 20px;
+    .btn-box {
+      cursor: pointer;
+      position: absolute;
+      right: 16px;
+      bottom: 8px;
+      display: flex;
+      height: 24px;
+      align-items: center;
+      gap: 4px;
+      font-size: 16px;
+      line-height: 24px;
+      color: #6524fc;
+      &.disabed-status {
+        cursor: not-allowed;
+      }
+    }
+  }
+  .ai-list-box {
+    margin-top: 8px;
+    border-radius: 12px;
+    min-height: 282px;
+    padding: 16px 3px 16px 16px;
+    border: 1px solid #2475fc;
+    background: #f0f5ff;
+  }
+}
+
+.prompt-list-box {
+  .prompt-list {
+    border: 1px solid var(--06, #d9d9d9);
+    background: #fff;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    padding: 9px 12px;
+  }
+  .prompt-header {
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    .prompt-title {
+      color: #262626;
+      font-weight: 600;
+      font-size: 14px;
+    }
+  }
+  .prompt-content {
+    white-space: pre-wrap;
+  }
+}
+.quick-tags-box {
+  display: flex;
+  align-items: center;
+  margin-top: 12px;
+  .quick-label {
+    padding-right: 8px;
+    color: #333;
+    font-weight: 500;
+  }
+  .quick-tags-content{
+    flex: 1;
+    display: flex;
+    gap: 8px;
+    flex-flow: row wrap;
+  }
+  .ant-tag {
+    cursor: pointer;
+  }
+}
+</style>

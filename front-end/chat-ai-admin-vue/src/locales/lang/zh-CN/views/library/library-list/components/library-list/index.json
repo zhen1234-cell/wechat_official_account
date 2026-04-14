@@ -1,0 +1,14 @@
+{
+  "syncing": "同步中",
+  "sync_failed": "同步失败",
+  "normal_knowledge_base": "文档",
+  "external_knowledge_base": "对外",
+  "qa_knowledge_base": "问答",
+  "official_account_knowledge_base": "公众号",
+  "delete": "删除",
+  "modify_group": "修改分组",
+  "document_count": "文档数量",
+  "storage_size": "存储大小",
+  "related_app": "关联应用",
+  "colon": "："
+}

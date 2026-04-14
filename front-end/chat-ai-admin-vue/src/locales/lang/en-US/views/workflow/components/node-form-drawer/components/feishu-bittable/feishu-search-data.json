@@ -1,0 +1,13 @@
+{
+  "title_query_conditions": "Query Conditions",
+  "opt_select_query_condition": "Select Query Conditions",
+  "opt_input_variable": "Input Variable",
+  "ph_input_content": "Please enter content, type \"/\" to insert variable",
+  "content_example": "Content example:",
+  "title_query_fields": "Query Fields",
+  "opt_select_query_fields": "Select Query Fields",
+  "title_sort": "Sort",
+  "opt_select_sort": "Select Sort",
+  "label_query_count": "Query Count"
+}
+

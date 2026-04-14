@@ -1,0 +1,14 @@
+{
+  "syncing": "Syncing",
+  "sync_failed": "Failed",
+  "normal_knowledge_base": "Normal Knowledge",
+  "external_knowledge_base": "External Knowledge",
+  "qa_knowledge_base": "Q&A Knowledge",
+  "official_account_knowledge_base": "WeChat Knowledge",
+  "delete": "Delete",
+  "modify_group": "Modify Group",
+  "document_count": "Document Count",
+  "storage_size": "Storage Size",
+  "related_app": "Related Apps",
+  "colon": ":"
+}

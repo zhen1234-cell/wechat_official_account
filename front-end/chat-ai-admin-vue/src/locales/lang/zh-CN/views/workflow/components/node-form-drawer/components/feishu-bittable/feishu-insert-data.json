@@ -1,0 +1,8 @@
+{
+  "label_insert_data": "插入数据",
+  "tip_empty_field": "（不填写字段值则为空）",
+  "opt_select_add_data": "选择添加数据",
+  "opt_input_variable": "输入变量",
+  "ph_input_content": "请输入内容，键入\"/\"可以插入变量",
+  "desc_data_example": "内容示例："
+}
