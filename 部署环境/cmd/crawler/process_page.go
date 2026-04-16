@@ -1,0 +1,989 @@
+// Copyright © 2016- 2025 Wuhan Sesame Small Customer Service Network Technology Co., Ltd.
+
+package main
+
+import (
+	"archive/zip"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	netURL "net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/antchfx/xmlquery"
+	"github.com/playwright-community/playwright-go"
+	"github.com/zhimaAi/go_tools/logs"
+)
+
+type PageInfo struct {
+	RawHtml     string `json:"html"`
+	MainHtml    string `json:"main_html"`
+	Screenshot  string `json:"screenshot"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Image       string `json:"image"`
+	Url         string `json:"url"`
+}
+
+type NeedWaitPageFunc func(page *playwright.Page) error
+type SpecialPageProcessingFunc func(page *playwright.Page) error
+
+const scroll = `
+async (args) => {
+    const {direction, speed} = args;
+    const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const scrollHeight = () => document.body.scrollHeight;
+    const start = direction === "down" ? 0 : scrollHeight();
+    const shouldStop = (position) => direction === "down" ? position > scrollHeight() : position < 0;
+    const increment = direction === "down" ? 100 : -100;
+    const delayTime = speed === "slow" ? 50 : 10;
+    console.error(start, shouldStop(start), increment)
+    for (let i = start; !shouldStop(i); i += increment) {
+        window.scrollTo(0, i);
+        await delay(delayTime);
+    }
+};
+`
+const NoCheckJs = `
+// 将模拟的 chrome 对象赋值给 window.chrome
+Object.defineProperty(window, 'chrome', {
+    value: {},
+    writable: true,
+    enumerable: true,
+    configurable: true
+});
+
+// 定义模拟的 chrome.runtime 对象
+window.chrome.runtime = {
+    id: "some_extension_id",
+    getURL: () => "chrome-extension://" + window.chrome.runtime.id + "/path",
+    onMessage: {
+        addListener: (callback) => {},
+        removeListener: (callback) => {}
+    },
+    sendMessage: (message, callback) => {
+        if (callback) {
+            callback({ message: "response" });
+        }
+        return Promise.resolve({ message: "response" });
+    }
+};
+
+// 定义模拟的 chrome.storage 对象
+window.chrome.storage = {
+    local: {
+        get: (keys, callback) => {
+            if (callback) {
+                callback({});
+            }
+            return Promise.resolve({});
+        },
+        set: (items, callback) => {
+            if (callback) {
+                callback();
+            }
+            return Promise.resolve();
+        },
+        remove: (keys, callback) => {
+            if (callback) {
+                callback();
+            }
+            return Promise.resolve();
+        }
+    },
+    sync: {
+        get: (keys, callback) => {
+            if (callback) {
+                callback({});
+            }
+            return Promise.resolve({});
+        },
+        set: (items, callback) => {
+            if (callback) {
+                callback();
+            }
+            return Promise.resolve();
+        },
+        remove: (keys, callback) => {
+            if (callback) {
+                callback();
+            }
+            return Promise.resolve();
+        }
+    }
+};
+
+// 定义模拟的 chrome.tabs 对象
+window.chrome.tabs = {
+    query: (queryInfo, callback) => {
+        if (callback) {
+            callback([]);
+        }
+        return Promise.resolve([]);
+    },
+    create: (createProperties, callback) => {
+        if (callback) {
+            callback({ id: 1 });
+        }
+        return Promise.resolve({ id: 1 });
+    },
+    remove: (tabId, callback) => {
+        if (callback) {
+            callback();
+        }
+        return Promise.resolve();
+    },
+    sendMessage: (tabId, message, callback) => {
+        if (callback) {
+            callback({ message: "response" });
+        }
+        return Promise.resolve({ message: "response" });
+    }
+};
+
+// 定义模拟的 chrome.extension 对象
+window.chrome.extension = {
+    getBackgroundPage: () => window,
+    getURL: () => "chrome-extension://" + window.chrome.runtime.id + "/path",
+    id: window.chrome.runtime.id,
+    isAllowedIncognitoAccess: () => true,
+    onConnect: {
+        addListener: (callback) => {},
+        removeListener: (callback) => {}
+    },
+    onMessage: window.chrome.runtime.onMessage,
+    sendMessage: window.chrome.runtime.sendMessage
+};
+
+// 锁定 window.chrome 对象，防止修改
+Object.defineProperty(window, 'chrome', {
+    value: window.chrome,
+    writable: false,
+    enumerable: true,
+    configurable: true
+});
+
+
+// 1. 保存原生 PluginArray 原型
+const nativePluginArrayProto = PluginArray.prototype;
+
+// 2. 创建自定义类继承原生原型
+class CustomPluginArray extends Array {
+  constructor(plugins) {
+	super(...plugins);
+	Object.setPrototypeOf(this, nativePluginArrayProto); // 绑定原生原型链
+  }
+}
+
+//CustomPluginArray.prototype.toString = function() {
+//	return '[object Plugin]';
+//};
+
+// 定义一个模拟的 Plugin 对象
+function MockPlugin(name, description) {
+    this.name = name;
+    this.description = description;
+    this.filename = "filename";
+    this.length = 1;
+    this[0] = {
+        type: "application/pdf",
+        suffixes: "pdf",
+        description: description,
+        enabledPlugin: this
+    };
+    this.toString = function() {
+        return '[object Plugin]';
+    };
+}
+
+// 创建模拟插件
+const plugin1 = new MockPlugin("PDF Viewer", "Portable Document Format");
+const plugin2 = new MockPlugin("Flash Player", "Shockwave Flash");
+// 3. 重定义 navigator.plugins
+Object.defineProperty(navigator, 'plugins', {
+  get: () => {
+	// 模拟插件数据（示例配置）
+	const fakePlugins = [
+	 plugin1,
+	  plugin2
+	];
+	return new CustomPluginArray(fakePlugins);
+  },
+  configurable: false,
+  enumerable: true
+});
+
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['zh-CN', 'zh'],
+});
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+  parameters.name === 'notifications' ?
+    Promise.resolve({ state: Notification.permission }) :
+    originalQuery(parameters)
+);
+
+const getParameter = WebGLRenderingContext.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(parameter) {
+  // UNMASKED_VENDOR_WEBGL
+  if (parameter === 37445) {
+    return 'Intel Open Source Technology Center';
+  }
+  // UNMASKED_RENDERER_WEBGL
+  if (parameter === 37446) {
+    return 'Mesa DRI Intel(R) Ivybridge Mobile ';
+  }
+
+  return getParameter(parameter);
+};
+
+// store the existing descriptor
+const elementDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+
+// redefine the property with a patched descriptor
+Object.defineProperty(HTMLDivElement.prototype, 'offsetHeight', {
+  ...elementDescriptor,
+  get: function() {
+    if (this.id === 'modernizr') {
+        return 1;
+    }
+    return elementDescriptor.get.apply(this);
+  },
+});
+`
+
+func fetchURLHtml(parsedURL *netURL.URL) (*PageInfo, error) {
+	// check if semaphore is full
+	select {
+	case concurrent <- struct{}{}:
+	default:
+		return nil, TooManyRequestsError
+	}
+	defer func() { <-concurrent }() // release semaphore
+
+	// Create an isolated context
+	acceptDownloads := false
+	//permissions := []string{"clipboard-read", "clipboard-write"}
+
+	// 禁用图片 / 字体可再省流量（可选）
+	permissions := []string{"notifications"} // 只给必要权限
+	userAgent := "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+	context, err := browser.NewContext(playwright.BrowserNewContextOptions{
+		Permissions:     permissions,
+		AcceptDownloads: &acceptDownloads,
+		UserAgent:       &userAgent,
+		// 1 MB 缓存，加快二次访问
+		//StorageStatePath: playwright.String("state.json"), // 事先登录后导出
+		Locale: playwright.String("zh-CN"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not create context: %v", err)
+	}
+	// create a new page
+	page, err := context.NewPage()
+
+	if err != nil {
+		return nil, fmt.Errorf("could not create page: %v", err)
+	}
+
+	defer func(page *playwright.Page, context *playwright.BrowserContext) {
+		_ = (*context).Close()
+		_ = (*page).Close()
+	}(&page, &context)
+
+	// 拦截掉 analytics / ad 域名，减少无用请求
+	err = page.Route("**/*.{png,jpg,jpeg,gif,css,woff2,woff}", func(route playwright.Route) {
+		err := route.Abort()
+		if err != nil {
+			return
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not intercept request: %v", err)
+	}
+
+	// navigate to url, with timeout 15s
+	if _, err = page.Goto(parsedURL.String(), playwright.PageGotoOptions{
+		//WaitUntil: playwright.WaitUntilStateLoad, // 等待页面加载完成
+		WaitUntil: playwright.WaitUntilStateLoad, // 或 DomContentLoaded 更快
+		Timeout:   playwright.Float(60000),       // 比默认 30 s 短
+	}); err != nil {
+		return nil, fmt.Errorf("could not navigate to url: %v", err)
+	}
+
+	// scroll to bottom to wait all images loaded
+	_, err = page.Evaluate(scroll, map[string]interface{}{"direction": "down", "speed": "fast"})
+	if err != nil {
+		return nil, fmt.Errorf("could not scroll to bottom: %v", err)
+	}
+
+	// wait for element
+	requestHostPath := parsedURL.Host + parsedURL.Path
+	for baseURL, processor := range needWaitPages {
+		matched, _ := regexp.MatchString(baseURL, requestHostPath)
+		if matched {
+			err := processor(&page)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+
+	// save raw html
+	var pageInfo PageInfo
+	pageInfo.RawHtml, err = page.Content()
+	if err != nil {
+		return nil, nil
+	}
+
+	// take screenshot
+	takeScreenshot(&page, &pageInfo)
+
+	//var mainHtml string
+	requestHostPath = parsedURL.Host + parsedURL.Path
+	for baseURL, processor := range specialPageProcessors {
+		matched, _ := regexp.MatchString(baseURL, requestHostPath)
+		if matched {
+			err := processor(&page)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+	pageInfo.Url = parsedURL.String()
+	pageInfo.Title, _ = page.Title()
+	pageInfo.MainHtml, err = page.Content()
+	if err != nil {
+		return nil, err
+	}
+	//获取页面 meta 中的标题、描述、图片
+	pageInfo = extractPageMeta(pageInfo)
+	return &pageInfo, nil
+}
+
+func fetchURLContent(parsedURL *netURL.URL) (*PageInfo, error) {
+	// check if semaphore is full
+	select {
+	case concurrent <- struct{}{}:
+	default:
+		return nil, TooManyRequestsError
+	}
+	defer func() { <-concurrent }() // release semaphore
+
+	// Create an isolated context
+	acceptDownloads := false
+	permissions := []string{"clipboard-read", "clipboard-write"}
+	userAgent := "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+	context, err := browser.NewContext(playwright.BrowserNewContextOptions{
+		Permissions:     permissions,
+		AcceptDownloads: &acceptDownloads,
+		UserAgent:       &userAgent,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("could not create context: %v", err)
+	}
+	// create a new page
+	page, err := context.NewPage()
+	if err != nil {
+		return nil, fmt.Errorf("could not create page: %v", err)
+	}
+
+	defer func(page *playwright.Page, context *playwright.BrowserContext) {
+		_ = (*context).Close()
+		_ = (*page).Close()
+	}(&page, &context)
+
+	errCheck := page.AddInitScript(playwright.Script{
+		Content: playwright.String(NoCheckJs),
+	})
+	if errCheck != nil {
+		return nil, fmt.Errorf("不能打开加入js: %v", err)
+	}
+	// navigate to url, with timeout 15s
+	if _, err = page.Goto(parsedURL.String(), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateLoad}); err != nil {
+		return nil, fmt.Errorf("could not navigate to url: %v", err)
+	}
+
+	// scroll to bottom to wait all images loaded
+	_, err = page.Evaluate(scroll, map[string]interface{}{"direction": "down", "speed": "fast"})
+	if err != nil {
+		return nil, fmt.Errorf("could not scroll to bottom: %v", err)
+	}
+
+	// wait for element
+	requestHostPath := parsedURL.Host + parsedURL.Path
+	for baseURL, processor := range needWaitPages {
+		matched, _ := regexp.MatchString(baseURL, requestHostPath)
+		if matched {
+			err := processor(&page)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+
+	// save raw html
+	var pageInfo PageInfo
+	pageInfo.RawHtml, err = page.Content()
+	if err != nil {
+		return nil, nil
+	}
+
+	// take screenshot
+	takeScreenshot(&page, &pageInfo)
+
+	//var mainHtml string
+	requestHostPath = parsedURL.Host + parsedURL.Path
+	for baseURL, processor := range specialPageProcessors {
+		matched, _ := regexp.MatchString(baseURL, requestHostPath)
+		if matched {
+			err := processor(&page)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+	pageInfo.Url = parsedURL.String()
+	pageInfo.Title, _ = page.Title()
+	pageInfo.MainHtml, err = page.Content()
+	if err != nil {
+		return nil, err
+	}
+	//获取页面 meta 中的标题、描述、图片
+	pageInfo = extractPageMeta(pageInfo)
+	return &pageInfo, nil
+}
+
+// 入口：传 page 即可
+func extractPageMeta(pageInfo PageInfo) PageInfo {
+	ogTitle := pickMeta(pageInfo.RawHtml, "og:title")
+	if ogTitle != `` && ogTitle != pageInfo.Title {
+		pageInfo.Title = ogTitle
+	}
+	pageInfo.Description = pickDescription(pageInfo.RawHtml)
+	pageInfo.Image = pickOGImageOrFirstImg(pageInfo.RawHtml, pageInfo.Url)
+	return pageInfo
+}
+
+// 1. 标准 description；2. 退到 og:description
+func pickDescription(html string) string {
+	// <meta name="description" content="...">
+	re := regexp.MustCompile(`(?i)<meta\s+name\s*=\s*["']description["'][^>]*content\s*=\s*["']([^"']+)["']`)
+	if m := re.FindStringSubmatch(html); len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
+	// 退到 og:description
+	return pickMeta(html, "og:description")
+}
+
+// 通用抠 meta content
+func pickMeta(html, property string) string {
+	re := regexp.MustCompile(`(?i)<meta\s+property\s*=\s*["']` + regexp.QuoteMeta(property) + `["'][^>]*content\s*=\s*["']([^"']+)["']`)
+	if m := re.FindStringSubmatch(html); len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
+}
+
+// 先拿 og:image，没有再找第一张 <img>
+func pickOGImageOrFirstImg(html, pageURL string) string {
+	// 1. og:image
+	if img := pickMeta(html, "og:image"); img != "" {
+		return img
+	}
+	// 2. 第一张 <img>
+	re := regexp.MustCompile(`(?i)<img(?:\s+[^>]*)?\ssrc\s*=\s*["']([^"']+)["']`)
+	if m := re.FindStringSubmatch(html); len(m) > 1 {
+		raw := strings.TrimSpace(m[1])
+		if u, err := netURL.Parse(raw); err == nil && !u.IsAbs() {
+			base, _ := netURL.Parse(pageURL)
+			raw = base.ResolveReference(u).String()
+		}
+		return raw
+	}
+	return ""
+}
+
+func takeScreenshot(page *playwright.Page, pageInfo *PageInfo) {
+	fullPage := true
+	screenshotBytes, err := (*page).Screenshot(playwright.PageScreenshotOptions{
+		FullPage: &fullPage,
+	})
+	if err != nil {
+		logs.Error("could not take screenshot: %v", err)
+		return
+	}
+
+	pageInfo.Screenshot = base64.StdEncoding.EncodeToString(screenshotBytes)
+}
+
+var needWaitPages = map[string]NeedWaitPageFunc{
+	"channels.weixin.qq.com/shop/learning-center": NeedWaitPageForChannelWeixin,
+	"juejin.cn/post": NeedWaitPageForJuejin,
+	"yuque.com":      NeedWaitPageForYuque,
+}
+
+func NeedWaitPageForChannelWeixin(page *playwright.Page) error {
+	state := playwright.WaitForSelectorState("visible")
+	timeout := float64(5000)
+	err := (*page).Locator("#exeditor-preview").WaitFor(playwright.LocatorWaitForOptions{State: &state, Timeout: &timeout})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func NeedWaitPageForJuejin(page *playwright.Page) error {
+	state := playwright.WaitForSelectorState("visible")
+	timeout := float64(10000)
+	err := (*page).Locator("article").WaitFor(playwright.LocatorWaitForOptions{State: &state, Timeout: &timeout})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func NeedWaitPageForYuque(page *playwright.Page) error {
+	state := playwright.WaitForSelectorState("visible")
+	timeout := float64(10000)
+	err := (*page).Locator("#doc-reader-content").WaitFor(playwright.LocatorWaitForOptions{State: &state, Timeout: &timeout})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+var specialPageProcessors = map[string]SpecialPageProcessingFunc{
+	"docs.qq.com/doc":     PageProcessForTencentDoc,
+	"kdocs.cn":            PageProcessForKDoc,
+	"feishu.cn":           PageProcessForFeishu,
+	"www.jianshu.com":     PageProcessForJianshu,
+	"yuque.com":           PageProcessForYuque,
+	"mp.weixin.qq.com/s/": PageProcessForWeixin,
+}
+
+// escapeJSContent escapes content for safe JavaScript evaluation
+func escapeJSContent(content string) string {
+	content = strings.ReplaceAll(content, "`", "\\`")
+	content = strings.ReplaceAll(content, "${", "\\${")
+	return content
+}
+
+func PageProcessForTencentDoc(page *playwright.Page) error {
+	waitCondition := `
+        () => window.pad &&
+              window.pad.contextService &&
+              window.pad.contextService.context &&
+              window.pad.contextService.context.editor &&
+              typeof window.pad.contextService.context.editor.run === 'function'
+    `
+	_, err := (*page).WaitForFunction(waitCondition, nil, playwright.PageWaitForFunctionOptions{
+		Timeout: playwright.Float(10000),
+	})
+	if err != nil {
+		logs.Error(err.Error())
+		return err
+	}
+
+	time.Sleep(3 * time.Second)
+	// window.pad.editor.readContext(0) 也可以获取纯文本内容
+	r, err := (*page).Evaluate(`
+let editor = window.pad.contextService.context.editor
+editor.run("selectAll")
+editor.clipboardManager.copyInterface.getCopyContent().html
+`)
+	if err != nil {
+		logs.Error(err.Error())
+		return err
+	}
+	content, ok := r.(string)
+	if !ok {
+		return errors.New("could not convert content to string")
+	}
+
+	// 处理HTML中的图片转为base64
+	content = processTencentDocImages(content)
+
+	_, err = (*page).Evaluate(fmt.Sprintf("document.body.innerHTML = `%s`", escapeJSContent(content)))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// processTencentDocImages 处理HTML中的图片链接，将其转换为base64
+func processTencentDocImages(htmlContent string) string {
+	imgRegex := regexp.MustCompile(`<img[^>]+src=["']([^"']+)["']`)
+	matches := imgRegex.FindAllStringSubmatch(htmlContent, -1)
+
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+
+		imgURL := match[1]
+		// 如果已经是base64格式，则跳过
+		if strings.HasPrefix(imgURL, "data:") {
+			continue
+		}
+
+		// 下载图片
+		imgData, mimeType, err := downloadImage(imgURL)
+		if err != nil {
+			logs.Error("下载图片失败: %v", err)
+			continue
+		}
+
+		// 转换为base64
+		base64Img := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(imgData))
+
+		// 替换原始URL为base64
+		oldImgTag := fmt.Sprintf(`src="%s"`, imgURL)
+		newImgTag := fmt.Sprintf(`src="%s"`, base64Img)
+		htmlContent = strings.Replace(htmlContent, oldImgTag, newImgTag, -1)
+
+		oldImgTag = fmt.Sprintf(`src='%s'`, imgURL)
+		newImgTag = fmt.Sprintf(`src='%s'`, base64Img)
+		htmlContent = strings.Replace(htmlContent, oldImgTag, newImgTag, -1)
+	}
+
+	return htmlContent
+}
+
+// downloadImage 下载图片并返回字节数据和MIME类型
+func downloadImage(url string) ([]byte, string, error) {
+	// 创建请求
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// 添加模拟浏览器的请求头
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+	req.Header.Set("Referer", "https://docs.qq.com/")
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Connection", "keep-alive")
+
+	// 发送GET请求下载图片
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Println(err)
+		}
+	}(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("下载图片HTTP状态码错误: %d", resp.StatusCode)
+	}
+
+	// 获取MIME类型
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "image/jpeg" // 默认MIME类型
+	}
+
+	// 读取图片数据
+	imgData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return imgData, mimeType, nil
+}
+
+func PageProcessForKDoc(page *playwright.Page) error {
+	// 解析出文档URL后缀
+	u, err := netURL.Parse((*page).URL())
+	if err != nil {
+		return err
+	}
+	path := u.Path
+	parts := strings.Split(path, "/")
+	lastSegment := ""
+	if len(parts) > 0 {
+		lastSegment = parts[len(parts)-1]
+	}
+
+	// 获取下载链接
+	downloadUrl, err := GetKDocDownloadUrl(fmt.Sprintf("https://www.kdocs.cn/api/office/file/%s/download", lastSegment))
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	// 下载文件
+	downloadFilename := fmt.Sprintf("kdoc_%s_%d.docx", lastSegment, time.Now().Unix())
+	defer func() {
+		if err := os.Remove(downloadFilename); err != nil {
+			log.Printf("删除文件 %s 失败: %v\n", downloadFilename, err)
+		}
+	}()
+	err = downloadKdocFile(downloadUrl, downloadFilename)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	// 去读文档内容
+	content, err := DocxInfoExtract(downloadFilename)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	// 拼接到html中
+	_, err = (*page).Evaluate(fmt.Sprintf("document.body.innerHTML = `%s`", escapeJSContent(content)))
+	if err != nil {
+		logs.Error(err.Error())
+		return err
+	}
+
+	return nil
+}
+
+func PageProcessForFeishu(page *playwright.Page) error {
+	_, _ = (*page).Evaluate(`document.querySelector(".doc-info-wrapper").remove()`)
+	content, err := (*page).Locator(`div[data-content-editable-root=true]`).InnerHTML()
+	if err != nil {
+		return err
+	}
+	_, err = (*page).Evaluate(fmt.Sprintf("document.body.innerHTML = `%s`", escapeJSContent(content)))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func PageProcessForJianshu(page *playwright.Page) error {
+	content, err := (*page).Locator(`//*[@id="__next"]/div[1]/div/div[1]/section[1]`).InnerHTML()
+	if err != nil {
+		return err
+	}
+	_, err = (*page).Evaluate(fmt.Sprintf("document.body.innerHTML = `%s`", escapeJSContent(content)))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func PageProcessForYuque(page *playwright.Page) error {
+	content, err := (*page).Locator(`#content`).InnerHTML()
+	if err != nil {
+		return err
+	}
+	content = escapeJSContent(content)
+	_, err = (*page).Evaluate(fmt.Sprintf("document.body.innerHTML = `%s`", content))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+func PageProcessForWeixin(page *playwright.Page) error {
+	content, err := (*page).Locator(`:is(#page-content.rich_media_area_primary, #js_article_content.rich_media_area_primary)`).InnerHTML()
+	if err != nil {
+		return err
+	}
+	_, err = (*page).Evaluate(fmt.Sprintf("document.body.innerHTML = `%s`", escapeJSContent(content)))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func GetKDocDownloadUrl(apiURL string) (string, error) {
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("发送 HTTP 请求失败: %w", err)
+	}
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		errorBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return "", fmt.Errorf("HTTP 请求返回非 OK 状态 (%v)，且读取错误信息失败: %w", resp.Status, readErr)
+		}
+		return "", fmt.Errorf("HTTP 请求返回非 OK 状态: %v, 响应体: %s", resp.Status, errorBody)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取响应体失败: %w", err)
+	}
+
+	type DownloadInfo struct {
+		DownloadURL string `json:"download_url"`
+		URL         string `json:"url"`
+		Fize        int    `json:"fize"`
+		Fver        int    `json:"fver"`
+		Store       string `json:"store"`
+	}
+	var downloadInfo DownloadInfo
+	err = json.Unmarshal(body, &downloadInfo)
+	if err != nil {
+		return "", fmt.Errorf("解析 JSON 数据失败: %w", err)
+	}
+
+	if downloadInfo.DownloadURL == "" {
+		return "", fmt.Errorf("JSON 中未找到 download_url 字段或其值为空")
+	}
+
+	return downloadInfo.DownloadURL, nil
+}
+
+func downloadKdocFile(url string, filename string) error {
+	// 创建一个文件用于保存下载内容
+	out, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("创建文件失败: %w", err)
+	}
+	defer func(out *os.File) {
+		err := out.Close()
+		if err != nil {
+			log.Println(err)
+		}
+	}(out)
+
+	// 发送 GET 请求下载文件
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("发送下载请求失败: %w", err)
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Println(err)
+		}
+	}(resp.Body)
+
+	// 检查 HTTP 状态码
+	if resp.StatusCode != http.StatusOK {
+		errorBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("下载请求返回非 OK 状态 (%v)，且读取错误信息失败: %w", resp.Status, readErr)
+		}
+		return fmt.Errorf("下载请求返回非 OK 状态: %v, 响应体: %s", resp.Status, errorBody)
+	}
+
+	// 将响应体内容复制到文件中
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return fmt.Errorf("复制响应体到文件失败: %w", err)
+	}
+
+	return nil
+}
+
+func DocxInfoExtract(name string) (string, error) {
+	reader, err := zip.OpenReader(name)
+	if err != nil {
+		return "", err
+	}
+	defer func(reader *zip.ReadCloser) {
+		_ = reader.Close()
+	}(reader)
+	rels := GetDocxRels(reader)
+	rc, err := GetFileByReader(reader, `word/document.xml`)
+	if err != nil {
+		return "", err
+	}
+	document, err := xmlquery.Parse(rc)
+	if err != nil {
+		return "", err
+	}
+	var result []string
+	xmlquery.FindEach(document, `//w:p`, func(_ int, wp *xmlquery.Node) {
+		var temp string
+		xmlquery.FindEach(wp, `//*`, func(_ int, node *xmlquery.Node) {
+			if node.Prefix == `w` && node.Data == `t` {
+				temp += "<p>" + node.InnerText() + "</p>"
+			}
+			if node.Prefix == `a` && node.Data == `blip` && len(node.Attr) > 0 {
+				if id, ok := GetNodeAttr(node.Attr, `r`, `embed`); ok && len(rels[id]) > 0 {
+					if imgStr, err := GetImgByZip(reader, `word/`+rels[id]); err == nil {
+						temp += fmt.Sprintf(`<img src="%s"/>`, imgStr) //图片信息
+					} else {
+						logs.Error(err.Error())
+					}
+				}
+			}
+		})
+		result = append(result, temp)
+	})
+
+	return strings.Join(result, "\r\n"), nil
+}
+
+func GetDocxRels(reader *zip.ReadCloser) (rels map[string]string) {
+	rels = make(map[string]string)
+	rc, err := GetFileByReader(reader, `word/_rels/document.xml.rels`)
+	if err != nil {
+		logs.Error(err.Error())
+		return
+	}
+	document, err := xmlquery.Parse(rc)
+	if err != nil {
+		logs.Error(err.Error())
+		return
+	}
+	xmlquery.FindEach(document, `//Relationship`, func(_ int, node *xmlquery.Node) {
+		id, _ := GetNodeAttr(node.Attr, ``, `Id`)
+		target, _ := GetNodeAttr(node.Attr, ``, `Target`)
+		if len(id) > 0 && len(target) > 0 {
+			rels[id] = target
+		}
+	})
+	return
+}
+
+func GetFileByReader(reader *zip.ReadCloser, name string) (io.ReadCloser, error) {
+	for _, file := range reader.File {
+		if file.Name == name {
+			return file.Open()
+		}
+	}
+	return nil, fmt.Errorf("file not found: %s", name)
+}
+
+func GetNodeAttr(attr []xmlquery.Attr, space, Local string) (string, bool) {
+	for _, item := range attr {
+		if item.Name.Space == space && item.Name.Local == Local {
+			return item.Value, true
+		}
+	}
+	return ``, false
+}
+
+func GetImgByZip(reader *zip.ReadCloser, name string) (imgStr string, err error) {
+	rc, err := GetFileByReader(reader, name)
+	if err != nil {
+		return
+	}
+	bs, err := io.ReadAll(rc)
+	if err != nil {
+		return
+	}
+	base64String := base64.StdEncoding.EncodeToString(bs)
+	ext := strings.ToLower(strings.TrimLeft(filepath.Ext(name), `.`))
+	return fmt.Sprintf("data:image/%s;base64,%s", ext, base64String), nil
+}
